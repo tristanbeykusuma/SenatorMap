@@ -2,12 +2,11 @@
 # Single Node web service: builds the Vite SPA, then serves it + the Express API
 # backed by better-sqlite3 on a persistent disk.
 #
-# Docs: https://docs.render.com/reference/render-yaml
+# Docs: https://docs.render.com/reference/blueprint
 
 services:
   - type: web
     name: senator-map
-    env: node
     region: us-oregon
     plan: free
     # Render free tier: 0.5 GB RAM, 1 vCPU, 1 GB disk + 1 GB persistent disk
@@ -16,9 +15,6 @@ services:
       name: senator-map-data
       mountPath: /var/data
       sizeGB: 1
-
-    # Root of the repo
-    root: .
 
     # Install deps for BOTH the client (Vite) and the server (Express),
     # then build the SPA into server/dist.
