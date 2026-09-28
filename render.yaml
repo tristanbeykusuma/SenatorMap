@@ -7,9 +7,10 @@
 services:
   - type: web
     name: senator-map
+    runtime: node
     region: us-oregon
-    plan: free
-    # Render free tier: 0.5 GB RAM, 1 vCPU, 1 GB disk + 1 GB persistent disk
+    plan: starter
+    # Starter plan: 1 vCPU, 512 MB RAM, 1 GB disk + 1 GB persistent disk
     # Persistent disk survives deploys/restarts — required for denyut.db + uploads
     disk:
       name: senator-map-data
