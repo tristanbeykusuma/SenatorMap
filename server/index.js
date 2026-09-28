@@ -1,0 +1,1242 @@
+import express from 'express';
+import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import Database from 'better-sqlite3';
+import multer from 'multer';
+import streamZip from 'node-stream-zip';
+import sax from 'sax';
+import XLSX from 'xlsx';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'denyut.db');
+const ROOT_DB_PATH = process.env.ROOT_DB_PATH || path.join(__dirname, '..', 'denyut.db');
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
+
+const db = new Database(DB_PATH);
+const rootDb = new Database(ROOT_DB_PATH);
+
+const upload = multer({ dest: UPLOAD_DIR });
+
+function colRefToNum(ref) {
+  let num = 0;
+  for (let i = 0; i < ref.length; i++) {
+    const c = ref.charCodeAt(i);
+    if (c >= 65 && c <= 90) num = num * 26 + (c - 64);
+    else if (c >= 97 && c <= 122) num = num * 26 + (c - 96);
+  }
+  return num - 1;
+}
+
+function parseSenatorMapData(filePath) {
+  return new Promise((resolve, reject) => {
+    try {
+      const workbook = XLSX.readFile(filePath);
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+      if (!jsonData || jsonData.length < 2) {
+        resolve({ data: [], stats: { total: 0, byStatus: {}, byBranch: {} } });
+        return;
+      }
+
+      const headers = jsonData[0];
+      const headerMap = {};
+      headers.forEach((h, i) => {
+        const normalized = String(h).toLowerCase().trim();
+        headerMap[normalized] = i;
+      });
+
+      const getCol = (names) => {
+        for (const name of names) {
+          const idx = headerMap[name.toLowerCase()];
+          if (idx !== undefined) return idx;
+        }
+        return -1;
+      };
+
+      const colBranchCode = getCol(['kode cabang', 'kode_cabang', 'branchcode', 'branch_code']);
+      const colBranchName = getCol(['cabang', 'branchname', 'branch_name', 'nama cabang']);
+      const colName = getCol(['nama lokasi', 'nama_lokasi', 'nearby_name', 'name', 'place name']);
+      const colAddress = getCol(['alamat', 'address']);
+const colLat = getCol(['nearby_lat', 'lat', 'latitude']);
+  const colLng = getCol(['nearby_lng', 'lng', 'longitude', 'long']);
+      const colStatus = getCol(['ket', 'status', 'ket status']);
+      const colMidNmid = getCol(['mid/nmid', 'mid_nmid', 'midnmid']);
+
+      const data = [];
+      const byStatus = {};
+      const byBranch = {};
+
+      for (let i = 1; i < jsonData.length; i++) {
+        const row = jsonData[i];
+        if (!row || row.length === 0) continue;
+
+        const branchCode = colBranchCode >= 0 ? String(row[colBranchCode] || '').trim() : '';
+        const branchName = colBranchName >= 0 ? String(row[colBranchName] || '').trim() : '';
+        const name = colName >= 0 ? String(row[colName] || '').trim() : '';
+        const address = colAddress >= 0 ? String(row[colAddress] || '').trim() : '';
+        const lat = colLat >= 0 ? parseFloat(row[colLat]) : 0;
+        const lng = colLng >= 0 ? parseFloat(row[colLng]) : 0;
+        const status = colStatus >= 0 ? String(row[colStatus] || '').trim() : 'Belum FU';
+        const midNmid = colMidNmid >= 0 ? row[colMidNmid] : '';
+
+        if (!name && !branchName && !branchCode) continue;
+        if (isNaN(lat) || isNaN(lng)) continue;
+
+        const location = {
+          id: i,
+          placeId: `place_${i}`,
+          branchCode,
+          branchName,
+          address,
+          lat,
+          lng,
+          name: name || branchName || `Location ${i}`,
+          status: status || 'Belum FU',
+          srcLat: lat,
+          srcLng: lng,
+          midNmid: midNmid || '',
+          sorotLink: ''
+        };
+
+        data.push(location);
+
+        byStatus[location.status] = (byStatus[location.status] || 0) + 1;
+        byBranch[location.branchName] = (byBranch[location.branchName] || 0) + 1;
+      }
+
+      const stats = {
+        total: data.length,
+        byStatus,
+        byBranch
+      };
+
+      resolve({ data, stats });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+function parseEchoWorkbook(filePath) {
+  return new Promise((resolve, reject) => {
+    try {
+      const workbook = XLSX.readFile(filePath);
+      const businessSheetName = workbook.SheetNames.find(name => /business|ecosystem|merchant|outlet|supplier|buyer/i.test(name)) || workbook.SheetNames[0];
+      const relationshipSheetName = workbook.SheetNames.find(name => /relationship|relation|transaction|link|edge/i.test(name));
+      const businessSheet = workbook.Sheets[businessSheetName];
+      const relationshipSheet = relationshipSheetName ? workbook.Sheets[relationshipSheetName] : null;
+      const businessRows = XLSX.utils.sheet_to_json(businessSheet, { header: 1 });
+      const relationshipRows = relationshipSheet ? XLSX.utils.sheet_to_json(relationshipSheet, { header: 1 }) : [];
+
+      if (!businessRows || businessRows.length < 2) {
+        resolve({ ecosystems: [], stats: { businesses: 0, relationships: 0 } });
+        return;
+      }
+
+      const normalize = value => String(value || '').trim().toLowerCase().replace(/[\s_/-]+/g, '');
+      const headerMap = (headers) => {
+        const map = {};
+        headers.forEach((h, i) => { map[normalize(h)] = i; });
+        return map;
+      };
+      const getCol = (map, names) => {
+        for (const name of names) {
+          const idx = map[normalize(name)];
+          if (idx !== undefined) return idx;
+        }
+        return -1;
+      };
+      const num = value => {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      const bool = value => {
+        const normalized = normalize(value);
+        return ['1', 'true', 'yes', 'ya', 'y', 'benar', 'sudah', 'closed', 'closedloop', 'loop'].includes(normalized);
+      };
+
+      const businessHeaders = businessRows[0] || [];
+      const businessMap = headerMap(businessHeaders);
+      const colName = getCol(businessMap, ['name', 'businessname', 'business', 'merchantname', 'merchant', 'outletname', 'outlet', 'suppliername', 'buyername']);
+      const colType = getCol(businessMap, ['businesstype', 'type', 'jenis', 'tipe', 'role']);
+      const colSegment = getCol(businessMap, ['segment', 'segmen', 'segmentation']);
+      const colLat = getCol(businessMap, ['lat', 'latitude', 'latitudekoordinat']);
+      const colLng = getCol(businessMap, ['lng', 'longitude', 'long']);
+      const colBranch = getCol(businessMap, ['branchcode', 'kodecabang', 'cabang']);
+      const colProducts = getCol(businessMap, ['productsheld', 'products', 'produk', 'product']);
+      const colEcommerce = getCol(businessMap, ['ecommercepotential', 'ecommerce', 'potensiecommerce', 'digitalpotential']);
+      const colSocial = getCol(businessMap, ['socialnetworkstrength', 'socialnetwork', 'social', 'jejaringsosial']);
+      const colPriority = getCol(businessMap, ['priorityscore', 'priority', 'score', 'skorprioritas']);
+      const colMandiri = getCol(businessMap, ['mandiricustomer', 'mandiri', 'nasabahmandiri', 'customermandiri']);
+
+      const businesses = [];
+      for (let i = 1; i < businessRows.length; i++) {
+        const row = businessRows[i];
+        if (!row || row.length === 0) continue;
+        const name = colName >= 0 ? String(row[colName] || '').trim() : '';
+        const lat = colLat >= 0 ? num(row[colLat]) : 0;
+        const lng = colLng >= 0 ? num(row[colLng]) : 0;
+        if (!name || !Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) continue;
+
+        const ecommercePotential = colEcommerce >= 0 ? num(row[colEcommerce]) : 0;
+        const socialNetworkStrength = colSocial >= 0 ? num(row[colSocial]) : 0;
+        const priorityScore = colPriority >= 0 ? num(row[colPriority]) : 0;
+        const mandiriCustomer = colMandiri >= 0 ? (bool(row[colMandiri]) ? 1 : 0) : 0;
+        const products = colProducts >= 0 ? String(row[colProducts] || '').split(/[;,]/).map(p => p.trim()).filter(Boolean) : [];
+        const businessType = colType >= 0 ? String(row[colType] || '').trim() : 'related';
+        const segment = colSegment >= 0 ? String(row[colSegment] || '').trim() : 'Pebisnis';
+
+        businesses.push({
+          id: `b_${i}`,
+          name,
+          segment,
+          businessType,
+          lat,
+          lng,
+          branchCode: colBranch >= 0 ? String(row[colBranch] || '').trim() : '',
+          productsHeld: products,
+          ecommercePotential,
+          socialNetworkStrength,
+          priorityScore,
+          priorityTier: priorityScore >= 80 ? 'High' : priorityScore >= 50 ? 'Medium' : 'Low',
+          mandiriCustomer,
+        });
+      }
+
+      const businessByName = new Map(businesses.map(b => [normalize(b.name), b]));
+      const relationships = [];
+      if (relationshipRows.length > 1) {
+        const relationshipHeaders = relationshipRows[0] || [];
+        const relationshipMap = headerMap(relationshipHeaders);
+        const colFrom = getCol(relationshipMap, ['frombusiness', 'from', 'source', 'sourcebusiness', 'businessfrom']);
+        const colTo = getCol(relationshipMap, ['tobusiness', 'to', 'target', 'targetbusiness', 'businessto']);
+        const colRelType = getCol(relationshipMap, ['relationshiptype', 'type', 'relationship', 'relation', 'linktype']);
+        const colCategory = getCol(relationshipMap, ['category', 'kategori', 'product', 'produk']);
+        const colTxValue = getCol(relationshipMap, ['transactionvalue', 'transaction', 'value', 'nilaitransaksi', 'amount']);
+        const colTxVolume = getCol(relationshipMap, ['transactionvolume', 'volume', 'jumlahtransaksi', 'count']);
+        const colClosed = getCol(relationshipMap, ['closedloop', 'closed', 'loop', 'loopmandiri', 'mandiriloop']);
+
+        for (let i = 1; i < relationshipRows.length; i++) {
+          const row = relationshipRows[i];
+          if (!row || row.length === 0) continue;
+          const fromName = colFrom >= 0 ? String(row[colFrom] || '').trim() : '';
+          const toName = colTo >= 0 ? String(row[colTo] || '').trim() : '';
+          const from = businessByName.get(normalize(fromName));
+          const to = businessByName.get(normalize(toName));
+          if (!from || !to) continue;
+
+          const explicitClosed = colClosed >= 0 ? bool(row[colClosed]) : false;
+          relationships.push({
+            id: `r_${i}`,
+            fromBusinessId: from.id,
+            toBusinessId: to.id,
+            relationshipType: colRelType >= 0 ? String(row[colRelType] || '').trim().toLowerCase() : 'partner',
+            category: colCategory >= 0 ? String(row[colCategory] || '').trim() : '',
+            transactionValue: colTxValue >= 0 ? num(row[colTxValue]) : 0,
+            transactionVolume: colTxVolume >= 0 ? Math.round(num(row[colTxVolume])) : 0,
+            closedLoop: explicitClosed || (from.mandiriCustomer && to.mandiriCustomer) ? 1 : 0,
+          });
+        }
+      }
+
+      const ecosystem = {
+        id: `echo_${Date.now()}`,
+        anchorName: businesses[0]?.name || 'ECHO Ecosystem',
+        anchorSegment: businesses[0]?.segment || 'Pebisnis',
+        businesses,
+        relationships,
+      };
+
+      resolve({ ecosystems: [ecosystem], stats: { businesses: businesses.length, relationships: relationships.length } });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+function findSimpleCycles(adj) {
+  const nodes = [...adj.keys()];
+  const nodeIndex = new Map(nodes.map((n, i) => [n, i]));
+  const cycles = [];
+  const seenKeys = new Set();
+
+  const canonical = (path) => {
+    let minIdx = 0;
+    let minVal = nodeIndex.get(path[0]) || 0;
+    for (let i = 1; i < path.length; i++) {
+      const v = nodeIndex.get(path[i]) || 0;
+      if (v < minVal) { minVal = v; minIdx = i; }
+    }
+    const rotated = [...path.slice(minIdx), ...path.slice(0, minIdx)];
+    return rotated.join('->');
+  };
+
+  const visit = (start, current, path, onPath) => {
+    const neighbors = adj.get(current) || [];
+    const startIdx = nodeIndex.get(start) || 0;
+    for (const nb of neighbors) {
+      const nbIdx = nodeIndex.get(nb);
+      if (nbIdx === undefined || nbIdx < startIdx) continue;
+      if (nb === start) {
+        const key = canonical(path);
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+          cycles.push([...path]);
+        }
+      } else if (!onPath.has(nb)) {
+        onPath.add(nb);
+        path.push(nb);
+        visit(start, nb, path, onPath);
+        path.pop();
+        onPath.delete(nb);
+      }
+    }
+  };
+
+  for (const start of nodes) {
+    visit(start, start, [start], new Set([start]));
+  }
+  return cycles;
+}
+
+function calculateEchoMetrics(ecosystem) {
+  const businesses = ecosystem.businesses || [];
+  const relationships = ecosystem.relationships || [];
+  const byId = new Map(businesses.map(b => [b.id, b]));
+
+  const totalTransactionValue = relationships.reduce((sum, r) => sum + (r.transactionValue || 0), 0);
+  const closedLoopValue = relationships.filter(r => r.closedLoop).reduce((sum, r) => sum + (r.transactionValue || 0), 0);
+  const closedLoopPercent = totalTransactionValue > 0 ? Math.round((closedLoopValue / totalTransactionValue) * 100) : 0;
+
+  const byBusinessType = {};
+  const ensureSlot = (type) => {
+    if (!byBusinessType[type]) byBusinessType[type] = { count: 0, transactionInValue: 0, transactionOutValue: 0 };
+  };
+  for (const b of businesses) {
+    ensureSlot(b.businessType);
+    byBusinessType[b.businessType].count += 1;
+  }
+  for (const r of relationships) {
+    const fromB = byId.get(r.fromBusinessId);
+    const toB = byId.get(r.toBusinessId);
+    if (fromB) { ensureSlot(fromB.businessType); byBusinessType[fromB.businessType].transactionOutValue += r.transactionValue || 0; }
+    if (toB) { ensureSlot(toB.businessType); byBusinessType[toB.businessType].transactionInValue += r.transactionValue || 0; }
+  }
+
+  const ecommercePotentialTotal = businesses.reduce((s, b) => s + (b.ecommercePotential || 0), 0);
+  const socialNetworkTotal = businesses.reduce((s, b) => s + (b.socialNetworkStrength || 0), 0);
+  const avgSocialNetworkStrength = businesses.length > 0 ? Math.round((socialNetworkTotal / businesses.length) * 100) / 100 : 0;
+  const mandiriCustomerCount = businesses.filter(b => b.mandiriCustomer).length;
+
+  const mandiriAdj = new Map();
+  for (const b of businesses) {
+    if (b.mandiriCustomer) mandiriAdj.set(b.id, []);
+  }
+  const cycleEdgeValues = new Map();
+  const edgeKey = (from, to) => `${from}->${to}`;
+  for (const r of relationships) {
+    const fromB = byId.get(r.fromBusinessId);
+    const toB = byId.get(r.toBusinessId);
+    if (fromB && toB && fromB.mandiriCustomer && toB.mandiriCustomer) {
+      mandiriAdj.get(r.fromBusinessId).push(r.toBusinessId);
+      cycleEdgeValues.set(edgeKey(r.fromBusinessId, r.toBusinessId), (cycleEdgeValues.get(edgeKey(r.fromBusinessId, r.toBusinessId)) || 0) + (r.transactionValue || 0));
+    }
+  }
+  const cycles = findSimpleCycles(mandiriAdj);
+  const edgesInCycle = new Set();
+  for (const cycle of cycles) {
+    for (let i = 0; i < cycle.length; i++) {
+      edgesInCycle.add(edgeKey(cycle[i], cycle[(i + 1) % cycle.length]));
+    }
+  }
+  const closedLoopCycleValue = [...edgesInCycle].reduce((sum, e) => sum + (cycleEdgeValues.get(e) || 0), 0);
+  const closedLoopCycleCount = cycles.length;
+
+  const topPotential = [...businesses]
+    .sort((a, b) => (b.priorityScore || 0) - (a.priorityScore || 0))
+    .slice(0, 5)
+    .map(b => ({ id: b.id, name: b.name, segment: b.segment, businessType: b.businessType, priorityScore: b.priorityScore || 0, priorityTier: b.priorityTier || 'Low' }));
+
+  return {
+    totalTransactionValue,
+    closedLoopValue,
+    closedLoopPercent,
+    leakagePercent: totalTransactionValue > 0 ? 100 - closedLoopPercent : 0,
+    closedLoopCycleCount,
+    closedLoopCycleValue,
+    ecommercePotentialTotal,
+    socialNetworkTotal,
+    avgSocialNetworkStrength,
+    mandiriCustomerCount,
+    byBusinessType,
+    businessCount: businesses.length,
+    relationshipCount: relationships.length,
+    topPotential,
+  };
+}
+
+function serializeEcosystem(ecosystem) {
+  const businesses = (ecosystem.businesses || []).map(b => ({
+    id: b.id,
+    name: b.name,
+    segment: b.segment,
+    businessType: b.business_type || b.businessType || 'related',
+    lat: b.lat,
+    lng: b.lng,
+    branchCode: b.branch_code || b.branchCode || '',
+    productsHeld: Array.isArray(b.products_held) ? b.products_held : (b.productsHeld || []),
+    ecommercePotential: b.ecommerce_potential ?? b.ecommercePotential ?? 0,
+    socialNetworkStrength: b.social_network_strength ?? b.socialNetworkStrength ?? 0,
+    priorityScore: b.priority_score ?? b.priorityScore ?? 0,
+    priorityTier: b.priority_tier || b.priorityTier || 'Low',
+    mandiriCustomer: Boolean(b.mandiri_customer ?? b.mandiriCustomer),
+    transactionInValue: 0,
+    transactionOutValue: 0,
+  }));
+  const index = new Map(businesses.map(b => [b.id, b]));
+  const relationships = (ecosystem.relationships || []).map(r => {
+    const fromB = index.get(r.from_business_id || r.fromBusinessId);
+    const toB = index.get(r.to_business_id || r.toBusinessId);
+    const explicitClosed = Boolean(r.closed_loop ?? r.closedLoop);
+    const reactiveClosed = Boolean(fromB && fromB.mandiriCustomer && toB && toB.mandiriCustomer);
+    return {
+      id: r.id,
+      fromBusinessId: r.from_business_id || r.fromBusinessId,
+      toBusinessId: r.to_business_id || r.toBusinessId,
+      type: r.relationship_type || r.relationshipType || 'partner',
+      category: r.category || '',
+      transactionValue: r.transaction_value ?? r.transactionValue ?? 0,
+      transactionVolume: r.transaction_volume ?? r.transactionVolume ?? 0,
+      closedLoop: explicitClosed || reactiveClosed,
+    };
+  });
+  for (const r of relationships) {
+    const v = r.transactionValue || 0;
+    const from = index.get(r.fromBusinessId);
+    const to = index.get(r.toBusinessId);
+    if (from) from.transactionOutValue += v;
+    if (to) to.transactionInValue += v;
+  }
+
+  return {
+    id: ecosystem.id,
+    anchorName: ecosystem.anchor_name || ecosystem.anchorName,
+    anchorSegment: ecosystem.anchor_segment || ecosystem.anchorSegment,
+    branchCode: ecosystem.branch_code || ecosystem.branchCode || '',
+    businesses,
+    relationships,
+  };
+}
+
+function initDb() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS customers (
+      cifno TEXT PRIMARY KEY,
+      name TEXT,
+      segment TEXT,
+      branch_code TEXT,
+      branch_name TEXT,
+      hub_id TEXT,
+      status TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cifno TEXT,
+      acctno TEXT,
+      actype TEXT,
+      template_period TEXT,
+      cbalrp REAL DEFAULT 0,
+      avgbalrp REAL DEFAULT 0,
+      rate REAL DEFAULT 0,
+      ddctyp TEXT,
+      datop6 TEXT,
+      status TEXT,
+      FOREIGN KEY (cifno) REFERENCES customers(cifno)
+    );
+    CREATE TABLE IF NOT EXISTS customer_balances (
+      cifno TEXT PRIMARY KEY,
+      cbalrp REAL DEFAULT 0,
+      avgbalrp REAL DEFAULT 0,
+      account_count INTEGER DEFAULT 0,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      product_breakdown TEXT
+    );
+    CREATE TABLE IF NOT EXISTS lending_balances (
+      cifno TEXT,
+      product_type TEXT,
+      limit_amount REAL DEFAULT 0,
+      outstanding_balance REAL DEFAULT 0,
+      account_count INTEGER DEFAULT 0,
+      PRIMARY KEY (cifno, product_type)
+    );
+    CREATE TABLE IF NOT EXISTS denyut_signals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cifno TEXT,
+      customer_name TEXT,
+      signal_type TEXT,
+      suggested_product TEXT,
+      urgency TEXT,
+      status TEXT DEFAULT 'new',
+      assigned_rm TEXT,
+      detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (cifno) REFERENCES customers(cifno)
+    );
+    CREATE TABLE IF NOT EXISTS default_data (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      data_type TEXT NOT NULL UNIQUE,
+      data TEXT NOT NULL,
+      stats TEXT,
+      uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS merchants (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      address TEXT,
+      lat REAL,
+      lng REAL,
+      status TEXT DEFAULT 'active'
+    );
+    CREATE TABLE IF NOT EXISTS merchant_sorot (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      merchant_id INTEGER,
+      reason TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (merchant_id) REFERENCES merchants(id)
+    );
+    CREATE TABLE IF NOT EXISTS echo_ecosystems (
+      id TEXT PRIMARY KEY,
+      anchor_name TEXT,
+      anchor_segment TEXT,
+      branch_code TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS echo_businesses (
+      id TEXT PRIMARY KEY,
+      ecosystem_id TEXT,
+      name TEXT,
+      segment TEXT,
+      business_type TEXT,
+      lat REAL,
+      lng REAL,
+      branch_code TEXT,
+      products_held TEXT,
+      ecommerce_potential REAL DEFAULT 0,
+      social_network_strength REAL DEFAULT 0,
+      priority_score REAL DEFAULT 0,
+      priority_tier TEXT,
+      mandiri_customer INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (ecosystem_id) REFERENCES echo_ecosystems(id)
+    );
+    CREATE TABLE IF NOT EXISTS echo_relationships (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ecosystem_id TEXT,
+      from_business_id TEXT,
+      to_business_id TEXT,
+      relationship_type TEXT,
+      category TEXT,
+      transaction_value REAL DEFAULT 0,
+      transaction_volume INTEGER DEFAULT 0,
+      closed_loop INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (ecosystem_id) REFERENCES echo_ecosystems(id),
+      FOREIGN KEY (from_business_id) REFERENCES echo_businesses(id),
+      FOREIGN KEY (to_business_id) REFERENCES echo_businesses(id)
+    );
+  `);
+}
+
+function streamParseTemplate(filePath, period) {
+  const stmtCustomer = db.prepare(`
+    INSERT OR REPLACE INTO customers (cifno, name, segment, branch_code, branch_name, hub_id, status, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `);
+  const stmtAccount = db.prepare(`
+    INSERT INTO accounts (cifno, acctno, actype, template_period, cbalrp, avgbalrp, rate, ddctyp, datop6, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const batchCustomer = [];
+  const batchAccount = [];
+  const BATCH_SIZE = 10000;
+  let totalRows = 0;
+  const sharedStrings = [];
+
+  return new Promise((resolve, reject) => {
+    const zip = new streamZip({ file: filePath, storeEntries: true });
+
+    zip.on('error', reject);
+
+    let pendingStreams = 0;
+    let ready = false;
+    let resolved = false;
+    let worksheetProcessed = false;
+    let worksheetRows = null;
+
+    function checkFinish() {
+      if (ready && pendingStreams === 0 && !resolved) {
+        resolved = true;
+        if (worksheetRows) {
+          processRows(worksheetRows, period);
+          for (let j = 0; j < batchCustomer.length; j += BATCH_SIZE) {
+            const chunkC = batchCustomer.splice(0, BATCH_SIZE);
+            const chunkA = batchAccount.splice(0, BATCH_SIZE);
+            const trans = db.transaction((bCust, bAcc) => {
+              for (const c of bCust) stmtCustomer.run(...c);
+              for (const a of bAcc) stmtAccount.run(...a);
+            });
+            trans(chunkC, chunkA);
+          }
+        }
+        zip.close();
+        resolve(totalRows);
+      }
+    }
+
+    zip.on('entry', (entry) => {
+      const isSharedStr = entry.name === 'xl/sharedStrings.xml';
+      const isWorksheet = entry.name === 'xl/worksheets/sheet2.xml' || entry.name === 'xl/worksheets/sheet1.xml';
+      if (!isSharedStr && !isWorksheet) return;
+      if (isWorksheet && worksheetProcessed) return;
+      if (isWorksheet) worksheetProcessed = true;
+
+      pendingStreams++;
+
+      zip.stream(entry, (err, stream) => {
+        if (err) {
+          pendingStreams--;
+          reject(err);
+          return;
+        }
+
+        if (isSharedStr) {
+          let currentSI = false;
+          let currentText = '';
+          const parser = sax.createStream(true, { lowercase: true });
+
+          parser.on('opentag', (node) => {
+            if (node.name === 'si') {
+              currentSI = true;
+              currentText = '';
+            }
+          });
+
+          parser.on('text', (text) => {
+            if (currentSI) {
+              currentText += text;
+            }
+          });
+
+          parser.on('closetag', (name) => {
+            if (name === 'si') {
+              sharedStrings.push(currentText);
+              currentSI = false;
+              currentText = '';
+            }
+          });
+
+          parser.on('error', reject);
+
+          parser.on('end', () => {
+            pendingStreams--;
+            checkFinish();
+          });
+
+          stream.pipe(parser);
+        }
+
+        if (isWorksheet) {
+          const rowsData = [];
+          let currentCell = null;
+          let currentCellValue = null;
+          const parser = sax.createStream(true, { lowercase: true });
+
+          parser.on('opentag', (node) => {
+            if (node.name === 'row') {
+              rowsData.push([]);
+            } else if (node.name === 'c') {
+              const ref = node.attributes.r || '';
+              const colRef = ref.replace(/\d+$/, '');
+              const colNum = colRefToNum(colRef);
+              currentCell = { colNum, type: node.attributes.t || '' };
+              currentCellValue = null;
+            }
+          });
+
+          parser.on('text', (text) => {
+            if (currentCell && text) {
+              currentCellValue = (currentCellValue || '') + text;
+            }
+          });
+
+          parser.on('closetag', (name) => {
+            if (name === 'c' && currentCell) {
+              let value = currentCellValue || '';
+              if (currentCell.type === 's' && sharedStrings.length > 0) {
+                const idx = parseInt(value);
+                value = sharedStrings[idx] || String(idx);
+              }
+              const lastRow = rowsData[rowsData.length - 1];
+              lastRow[currentCell.colNum] = value;
+              currentCell = null;
+              currentCellValue = null;
+            }
+          });
+
+          parser.on('error', reject);
+
+           parser.on('end', () => {
+            worksheetRows = rowsData;
+            pendingStreams--;
+            checkFinish();
+          });
+
+          stream.pipe(parser);
+        }
+      });
+    });
+
+    zip.on('ready', () => {
+      ready = true;
+      checkFinish();
+    });
+  });
+
+  function processRows(rows, p) {
+    for (let i = 4; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || !Array.isArray(row) || row.length < 18) continue;
+
+      const cifno = String(row[3] || '').trim();
+      if (!cifno || cifno === 'Grand Total') continue;
+
+      const productType = String(row[17] || '').trim();
+
+      const customerData = [
+        cifno,
+        String(row[6] || '').trim(),
+        productType,
+        String(row[0] || '').trim(),
+        String(row[1] || '').trim(),
+        String(row[2] || '').trim(),
+        'active'
+      ];
+
+      const accountData = [
+        cifno,
+        String(row[4] || '').trim(),
+        productType,
+        p,
+        parseFloat(row[5] || 0) || 0,
+        parseFloat(row[6] || 0) || 0,
+        parseFloat(row[11] || 0) || 0,
+        String(row[14] || '').trim(),
+        String(row[15] || '').trim(),
+        'active'
+      ];
+
+      batchCustomer.push(customerData);
+      batchAccount.push(accountData);
+      totalRows++;
+    }
+  }
+}
+
+app.get('/api/admin/status', (req, res) => {
+  const counts = {
+    customers: db.prepare('SELECT COUNT(*) as cnt FROM customers').get().cnt,
+    accounts: db.prepare('SELECT COUNT(*) as cnt FROM accounts').get().cnt,
+    signals: db.prepare('SELECT COUNT(*) as cnt FROM denyut_signals').get().cnt
+  };
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), data: counts });
+});
+
+app.post('/api/admin/upload/senator', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const stats = await streamParseTemplate(req.file.path, 'senator');
+    db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('senator', JSON.stringify([]), JSON.stringify({ processed: stats }));
+    res.json({ success: true, data: [], stats: { processed: stats } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+function parseRadarWorkbook(filePath) {
+  return new Promise((resolve, reject) => {
+    try {
+      const workbook = XLSX.readFile(filePath);
+      // Use the "Prosentase" (performance ratio) sheet — it carries the
+      // lagging/leading classification data for every branch.
+      const sheetName = workbook.SheetNames.find(n => /sentase/i.test(n)) || workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const json = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+      const num = v => { const p = parseFloat(v); return Number.isFinite(p) ? p : null; };
+
+      // The sheet has several product sections stacked vertically. Every real
+      // branch row starts with a 5-digit branch code and a branch name.
+      // Data layout per row (verified against REKAM MEDIS CABANG JULI 2026.xlsx):
+      //   col 0 = branch code, col 1 = branch name, col 4 = product type (may be absent)
+      //   cols 5..28 = 24 monthly nominal values (may be absent)
+      //   cols 29..47 = per-product values (ratios for some products, nominal for others)
+      //   col 102 = aggregate year (2024/2025/2026), cols 103..114 = aggregate
+      //     performance ratios (12 when year is 2024/2025, 7 when year is 2026)
+      // The aggregate block is only present on rows long enough (len >= 110).
+      // We collect EVERY branch and use the last available aggregate ratio as the
+      // branch performance, so all 41 branches show up on the radar map.
+
+      const latestRatio = (row, start, end) => {
+        for (let c = end; c >= start; c--) {
+          const v = num(row[c]);
+          if (v !== null) return v;
+        }
+        return null;
+      };
+
+      const branchMap = new Map();
+
+      for (let i = 7; i < json.length; i++) {
+        const row = json[i];
+        if (!row || row.length < 2) continue;
+        const code = String(row[0] || '').trim();
+        const name = String(row[1] || '').trim();
+        // Only real branch rows: 5-digit code + a name.
+        // This skips area headers (Kota Surakarta, Kab. Klaten…), the "138 Area
+        // Solo" pseudo-row, section headers (LEADING, PROFITABILITAS…), and
+        // "Historical Pencapaian" / date-separator label rows.
+        if (!/^\d{5}$/.test(code) || !name) continue;
+
+        // Monthly nominal total (assets under management proxy).
+        let totalDpk = 0;
+        for (let c = 5; c <= 28; c++) { const v = num(row[c]); if (v !== null) totalDpk += v; }
+
+        // Growth rate from the last two monthly values, when available.
+        const m24 = num(row[27]); // 2nd-to-last of the 24-month block
+        const m23 = num(row[28]); // last
+        let growthRate = 0;
+        if (m23 !== null && m24 !== null && m24 > 0) {
+          growthRate = ((m23 - m24) / m24) * 100;
+        }
+
+        // Best available aggregate performance ratio (×100 → percent).
+        // Only the cols 103..114 block holds ratios; cols 29..47 hold nominal
+        // values for ratio-only product rows, so they are NOT used here.
+        const perfRatio = latestRatio(row, 103, 114);
+        const perf = perfRatio === null ? 0 : perfRatio * 100;
+
+        if (!branchMap.has(code)) {
+          branchMap.set(code, { code, name, totalDpk: 0, growthRate, perf });
+        }
+        const b = branchMap.get(code);
+        b.totalDpk += totalDpk;
+        // Keep the best (max) performance ratio if a branch spans multiple product rows.
+        if (perf > b.perf) b.perf = perf;
+      }
+
+      const classify = pct => pct >= 90 ? 'performing' : pct >= 75 ? 'partially performing' : 'non-performing';
+
+      const branches = [];
+      let idx = 0;
+      for (const b of branchMap.values()) {
+        const perf = b.perf;
+        const laggingClass = classify(perf);
+        const leadingClass = classify(perf);
+
+        branches.push({
+          id: ++idx,
+          branchCode: b.code,
+          branchName: b.name,
+          lat: 0,
+          lng: 0,
+          performance: b.growthRate >= 0 ? 'growing' : 'stagnant',
+          performanceValue: perf,
+          totalDpk: b.totalDpk,
+          growthRate: b.growthRate,
+          laggingScore: perf,
+          laggingClass,
+          leadingScore: perf,
+          leadingClass,
+          leadingGreen: 0,
+          leadingTotal: 0,
+          products: [],
+          dpkProducts: [],
+          kreditProducts: [],
+          leadingProducts: [],
+        });
+      }
+
+      resolve(branches);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+app.post('/api/admin/upload/radar', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const stats = await streamParseTemplate(req.file.path, 'radar');
+    db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('radar', JSON.stringify([]), JSON.stringify({ processed: stats }));
+    res.json({ success: true, data: [], stats: { processed: stats } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/upload/radar', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const branches = await parseRadarWorkbook(req.file.path);
+    res.json({ success: true, data: branches, stats: { processed: branches.length } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/admin/upload/denyut', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const clear = req.query.clear === 'true';
+  try {
+    if (clear) {
+      db.exec('DELETE FROM denyut_signals');
+    }
+    const stats = await streamParseTemplate(req.file.path, 'denyut');
+    res.json({ success: true, data: [], stats: { processed: stats }, rowsProcessed: stats, periods: ['denyut'], cleared: clear });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/default/senator', (req, res) => {
+  const row = db.prepare('SELECT data FROM default_data WHERE data_type = ?').get(['senator']);
+  if (!row) return res.json({ data: null });
+  try { res.json(JSON.parse(row.data)); } catch { res.status(500).json({ error: 'Invalid JSON' }); }
+});
+
+app.get('/api/default/radar', (req, res) => {
+  const row = db.prepare('SELECT data FROM default_data WHERE data_type = ?').get(['radar']);
+  if (!row) return res.json({ data: null });
+  try { res.json(JSON.parse(row.data)); } catch { res.status(500).json({ error: 'Invalid JSON' }); }
+});
+
+app.get('/api/echo/ecosystems', (req, res) => {
+  const ecosystems = db.prepare('SELECT * FROM echo_ecosystems ORDER BY created_at DESC').all();
+  const result = ecosystems.map(eco => {
+    const businesses = db.prepare('SELECT * FROM echo_businesses WHERE ecosystem_id = ? ORDER BY name').all(eco.id);
+    const relationships = db.prepare('SELECT * FROM echo_relationships WHERE ecosystem_id = ? ORDER BY id').all(eco.id);
+    const serialized = serializeEcosystem({ ...eco, businesses, relationships });
+    return { ...serialized, metrics: calculateEchoMetrics(serialized) };
+  });
+  res.json({ ecosystems: result });
+});
+
+app.get('/api/echo/ecosystems/:id', (req, res) => {
+  const eco = db.prepare('SELECT * FROM echo_ecosystems WHERE id = ?').get(req.params.id);
+  if (!eco) return res.status(404).json({ error: 'Ecosystem not found' });
+  const businesses = db.prepare('SELECT * FROM echo_businesses WHERE ecosystem_id = ? ORDER BY name').all(eco.id);
+  const relationships = db.prepare('SELECT * FROM echo_relationships WHERE ecosystem_id = ? ORDER BY id').all(eco.id);
+  const serialized = serializeEcosystem({ ...eco, businesses, relationships });
+  res.json({ ecosystem: serialized, metrics: calculateEchoMetrics(serialized) });
+});
+
+app.post('/api/echo/upload', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const clear = req.query.clear === 'true';
+  try {
+    const parsed = await parseEchoWorkbook(req.file.path);
+    if (clear) {
+      db.exec('DELETE FROM echo_relationships; DELETE FROM echo_businesses; DELETE FROM echo_ecosystems;');
+    }
+
+    const insertEcosystem = db.prepare('INSERT INTO echo_ecosystems (id, anchor_name, anchor_segment, branch_code) VALUES (?, ?, ?, ?)');
+    const insertBusiness = db.prepare(`
+      INSERT INTO echo_businesses (
+        id, ecosystem_id, name, segment, business_type, lat, lng, branch_code, products_held,
+        ecommerce_potential, social_network_strength, priority_score, priority_tier, mandiri_customer
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertRelationship = db.prepare(`
+      INSERT INTO echo_relationships (
+        ecosystem_id, from_business_id, to_business_id, relationship_type, category,
+        transaction_value, transaction_volume, closed_loop
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertAll = db.transaction((ecosystems) => {
+      for (const eco of ecosystems) {
+        insertEcosystem.run(eco.id, eco.anchorName, eco.anchorSegment, eco.branchCode || '');
+        for (const b of eco.businesses) {
+          insertBusiness.run(
+            b.id,
+            eco.id,
+            b.name,
+            b.segment,
+            b.businessType,
+            b.lat,
+            b.lng,
+            b.branchCode || '',
+            JSON.stringify(b.productsHeld || []),
+            b.ecommercePotential || 0,
+            b.socialNetworkStrength || 0,
+            b.priorityScore || 0,
+            b.priorityTier || 'Low',
+            b.mandiriCustomer ? 1 : 0
+          );
+        }
+        for (const r of eco.relationships) {
+          insertRelationship.run(
+            eco.id,
+            r.fromBusinessId,
+            r.toBusinessId,
+            r.relationshipType,
+            r.category || '',
+            r.transactionValue || 0,
+            r.transactionVolume || 0,
+            r.closedLoop ? 1 : 0
+          );
+        }
+      }
+    });
+
+    insertAll(parsed.ecosystems);
+    const enriched = parsed.ecosystems.map(eco => {
+      const serialized = serializeEcosystem(eco);
+      return { ...serialized, metrics: calculateEchoMetrics(serialized) };
+    });
+    res.json({ success: true, ...parsed.stats, ecosystems: enriched });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch('/api/echo/businesses/:id', (req, res) => {
+  const { id } = req.params;
+  const { mandiri_customer, mandiriCustomer, priority_score, priorityScore, business_type, businessType } = req.body;
+  const row = db.prepare('SELECT * FROM echo_businesses WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Business not found' });
+  const isMandiri = mandiri_customer !== undefined ? mandiri_customer : mandiriCustomer;
+  const prio = priority_score !== undefined ? priority_score : priorityScore;
+  const btype = business_type !== undefined ? business_type : businessType;
+  if (isMandiri !== undefined) db.prepare('UPDATE echo_businesses SET mandiri_customer = ? WHERE id = ?').run(isMandiri ? 1 : 0, id);
+  if (prio !== undefined) db.prepare('UPDATE echo_businesses SET priority_score = ? WHERE id = ?').run(Number(prio), id);
+  if (btype !== undefined) db.prepare('UPDATE echo_businesses SET business_type = ? WHERE id = ?').run(String(btype), id);
+  const eco = db.prepare('SELECT * FROM echo_ecosystems WHERE id = ?').get(row.ecosystem_id);
+  const businesses = db.prepare('SELECT * FROM echo_businesses WHERE ecosystem_id = ? ORDER BY name').all(eco.id);
+  const relationships = db.prepare('SELECT * FROM echo_relationships WHERE ecosystem_id = ? ORDER BY id').all(eco.id);
+  const serialized = serializeEcosystem({ ...eco, businesses, relationships });
+  res.json({ ecosystem: serialized, metrics: calculateEchoMetrics(serialized) });
+});
+
+app.delete('/api/echo/ecosystems/:id', (req, res) => {
+  const { id } = req.params;
+  const row = db.prepare('SELECT * FROM echo_ecosystems WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Ecosystem not found' });
+  db.prepare('DELETE FROM echo_relationships WHERE ecosystem_id = ?').run(id);
+  db.prepare('DELETE FROM echo_businesses WHERE ecosystem_id = ?').run(id);
+  db.prepare('DELETE FROM echo_ecosystems WHERE id = ?').run(id);
+  res.json({ success: true, deletedId: id });
+});
+
+app.get('/api/denyut/stats', (req, res) => {
+  const totalCustomers = db.prepare('SELECT COUNT(*) as cnt FROM customers').get().cnt;
+  const totalAccounts = db.prepare('SELECT COUNT(*) as cnt FROM accounts').get().cnt;
+  const totalSignals = db.prepare('SELECT COUNT(*) as cnt FROM denyut_signals').get().cnt;
+   const totalBalance = db.prepare('SELECT COALESCE(SUM(cbalrp), 0) as val FROM customer_balances').get().val;
+
+  const signalRows = db.prepare(`
+    SELECT status, COUNT(*) as cnt FROM denyut_signals GROUP BY status
+  `).all();
+  const signalCounts = {};
+  for (const row of signalRows) {
+    signalCounts[row.status] = row.cnt;
+  }
+
+  const urgencyRows = db.prepare(`
+    SELECT urgency, COUNT(*) as cnt FROM denyut_signals GROUP BY urgency
+  `).all();
+  const urgencyCounts = {};
+  for (const row of urgencyRows) {
+    urgencyCounts[row.urgency] = row.cnt;
+  }
+
+  const periodRows = db.prepare(`
+    SELECT DISTINCT template_period FROM accounts ORDER BY template_period
+  `).all();
+  const periods = periodRows.map(r => r.template_period);
+
+  const totalLending = db.prepare('SELECT COALESCE(SUM(outstanding_balance), 0) as val FROM lending_balances').get().val;
+  const totalLendingAccounts = db.prepare('SELECT COUNT(*) as cnt FROM lending_balances').get().cnt;
+
+  res.json({
+    totalCustomers,
+    totalAccounts,
+    totalBalance,
+    totalSignals,
+    signalCounts,
+    urgencyCounts,
+    periods,
+    totalLending,
+    totalLendingAccounts,
+  });
+});
+
+app.get('/api/denyut/search', (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (!q) return res.json({ customers: [] });
+  const results = db.prepare(`
+    SELECT DISTINCT c.cifno, c.name, c.segment, c.branch_code, c.branch_name, c.hub_id, c.status,
+      (SELECT COUNT(*) FROM accounts WHERE cifno = c.cifno) as account_count,
+      (SELECT COALESCE(cb.cbalrp, 0) FROM customer_balances cb WHERE cb.cifno = c.cifno) as latest_balance,
+      (SELECT COALESCE(SUM(lb.outstanding_balance), 0) FROM lending_balances lb WHERE lb.cifno = c.cifno) as lending_outstanding
+    FROM customers c
+    WHERE c.cifno LIKE ? OR c.name LIKE ?
+    LIMIT 50
+  `).all(`%${q}%`, `%${q}%`);
+  res.json({ customers: results });
+});
+
+app.get('/api/denyut/customer/:cifno', (req, res) => {
+  const { cifno } = req.params;
+  const customer = db.prepare('SELECT c.*, (SELECT COUNT(*) FROM accounts WHERE cifno = c.cifno) as account_count, (SELECT COALESCE(cb.cbalrp, 0) FROM customer_balances cb WHERE cb.cifno = c.cifno) as latest_balance FROM customers c WHERE cifno = ?').get([cifno]);
+  if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+  const portfolio = db.prepare('SELECT * FROM accounts WHERE cifno = ? ORDER BY template_period DESC').all([cifno]);
+
+  const yearData = db.prepare(`
+    SELECT template_period,
+      COALESCE(SUM(CAST(cbalrp AS REAL)), 0) as total_balance,
+      COALESCE(SUM(CAST(avgbalrp AS REAL)), 0) as avg_balance,
+      COUNT(*) as account_count,
+      GROUP_CONCAT(DISTINCT actype) as product_types
+    FROM accounts
+    WHERE cifno = ?
+    GROUP BY template_period
+    ORDER BY template_period
+  `).all([cifno]);
+
+  const signals = db.prepare('SELECT * FROM denyut_signals WHERE cifno = ? ORDER BY detected_at DESC').all([cifno]);
+
+  const lendingPortfolio = db.prepare('SELECT * FROM lending_balances WHERE cifno = ? ORDER BY outstanding_balance DESC').all([cifno]);
+
+  const balanceBreakdown = db.prepare('SELECT product_breakdown FROM customer_balances WHERE cifno = ?').get([cifno]);
+
+  let productBreakdown = {};
+  if (balanceBreakdown && balanceBreakdown.product_breakdown) {
+    try {
+      productBreakdown = JSON.parse(balanceBreakdown.product_breakdown);
+    } catch (e) {
+      productBreakdown = {};
+    }
+  }
+
+  res.json({ customer, portfolio, yearData, signals, lendingPortfolio, productBreakdown });
+});
+
+app.patch('/api/denyut/signal/:id', (req, res) => {
+  const { id } = req.params;
+  const { status, assigned_rm } = req.body;
+  const updates = [];
+  const params = [];
+  if (status !== undefined) { updates.push('status = ?'); params.push(status); }
+  if (assigned_rm !== undefined) { updates.push('assigned_rm = ?'); params.push(assigned_rm); }
+  if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
+  params.push(id);
+  db.prepare(`UPDATE denyut_signals SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  const updated = db.prepare('SELECT * FROM denyut_signals WHERE id = ?').get([id]);
+  res.json(updated);
+});
+
+app.post('/api/upload/preview', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const data = await previewXlsx(req.file.path);
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/upload/confirm', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const result = await parseSenatorMapData(req.file.path);
+    res.json({ success: true, data: result.data, stats: result.stats });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch('/api/merchants/:id/status', (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  db.prepare('UPDATE merchants SET status = ? WHERE id = ?').run(status, id);
+  const updated = db.prepare('SELECT * FROM merchants WHERE id = ?').get([id]);
+  res.json(updated);
+});
+
+app.patch('/api/merchants/:id/sorot', (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  db.prepare('INSERT INTO merchant_sorot (merchant_id, reason) VALUES (?, ?)').run(id, reason);
+  const merchant = db.prepare('SELECT * FROM merchants WHERE id = ?').get([id]);
+  const sorot = db.prepare('SELECT * FROM merchant_sorot WHERE merchant_id = ? ORDER BY created_at DESC').all([id]);
+  res.json({ merchant, sorot });
+});
+
+app.get('/api/merchants', (req, res) => {
+  const merchants = db.prepare('SELECT * FROM merchants ORDER BY id LIMIT 100').all();
+  res.json(merchants);
+});
+
+function previewXlsx(filePath) {
+  return new Promise((resolve, reject) => {
+    try {
+      const workbook = XLSX.readFile(filePath);
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+      if (!jsonData || jsonData.length === 0) {
+        resolve({ columns: [], sampleRows: [], totalRows: 0 });
+        return;
+      }
+
+      const columns = jsonData[0] || [];
+      const sampleRows = jsonData.slice(1, 11);
+      const totalRows = jsonData.length - 1;
+
+      resolve({ columns, sampleRows, totalRows });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+// Serve the production frontend build (client/dist) for all non-API routes.
+const DIST_DIR = path.join(__dirname, 'dist');
+if (fs.existsSync(DIST_DIR)) {
+  app.use(express.static(DIST_DIR, { maxAge: '1y', etag: true }));
+  app.get('*', (req, res) => {
+    if (req.path.startsWith('/api/')) return;
+    res.sendFile(path.join(DIST_DIR, 'index.html'));
+  });
+}
+
+initDb();
+
+const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(`Server running on ${HOST}:${PORT}`);
+});

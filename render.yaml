@@ -1,0 +1,50 @@
+# Render deployment config for Senator Map
+# Single Node web service: builds the Vite SPA, then serves it + the Express API
+# backed by better-sqlite3 on a persistent disk.
+#
+# Docs: https://docs.render.com/reference/render-yaml
+
+services:
+  - type: web
+    name: senator-map
+    env: node
+    region: oregon
+    plan: free
+    # Render free tier: 0.5 GB RAM, 1 vCPU, 1 GB disk + 1 GB persistent disk
+    # Persistent disk survives deploys/restarts — required for denyut.db + uploads
+    disk:
+      name: senator-map-data
+      mountPath: /var/data
+      sizeGB: 1
+
+    # Root of the repo = C:\Projects\SenatorMap (package.json here)
+    root: .
+
+    # Install deps for BOTH the client (Vite) and the server (Express),
+    # then build the SPA into server/dist.
+    buildCommand: |
+      cd server/client && npm install && npm run build
+      cd ../ && npm install
+
+    # Start the Express server. It serves the built SPA from server/dist and
+    # the /api/* routes. PORT is auto-injected by Render.
+    startCommand: cd server && npm start
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_PATH
+        value: /var/data/denyut.db
+      - key: ROOT_DB_PATH
+        value: /var/data/denyut.db
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+
+    # Health check — Render polls this; must return 200 for the service to be "up"
+    healthCheckPath: /api/admin/status
+
+    # Auto-deploy on push to main
+    autoDeploy: true
+
+    # Keep the last 3 successful builds for fast rollbacks
+    numBuildWorkers: 1

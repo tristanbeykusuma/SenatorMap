@@ -1,0 +1,643 @@
+.denyut-page {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #0f172a;
+}
+
+.denyut-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.radar-map-container {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+  background: #1a1a2e;
+  border: 2px solid #22c55e;
+}
+
+.radar-map-container > * {
+  min-height: 0;
+}
+
+.denyut-sidebar {
+  width: 400px;
+  min-width: 400px;
+  max-width: 400px;
+  background: #1e1e2e;
+  color: #cdd6f4;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 12px;
+  gap: 12px;
+  flex-shrink: 0;
+  overscroll-behavior: contain;
+}
+
+.denyut-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.denyut-header p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #6c7086;
+}
+
+.denyut-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+}
+
+.denyut-stat {
+  text-align: center;
+  padding: 8px 4px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.05);
+}
+
+.denyut-stat-value {
+  display: block;
+  font-size: 14px;
+  font-weight: bold;
+  color: #cdd6f4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.denyut-stat-label {
+  font-size: 9px;
+  color: #6c7086;
+  text-transform: uppercase;
+}
+
+.denyut-search {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.denyut-search .search-input {
+  width: 100%;
+  flex: none;
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 8px;
+  color: #cdd6f4;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.denyut-search .search-input::placeholder {
+  color: #6c7086;
+}
+
+.denyut-results {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.denyut-results h4 {
+  font-size: 13px;
+  color: #cdd6f4;
+  margin: 0 0 8px;
+}
+
+.no-results {
+  padding: 16px;
+  text-align: center;
+  color: #6c7086;
+  font-size: 13px;
+}
+
+.customer-item {
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid transparent;
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.customer-item:hover {
+  background: rgba(255,255,255,0.08);
+}
+
+.customer-item.selected {
+  border-color: rgba(136,198,255,0.3);
+  background: rgba(136,198,255,0.1);
+}
+
+.customer-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #cdd6f4;
+  margin-bottom: 4px;
+}
+
+.customer-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: #6c7086;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.customer-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.customer-summary {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #a6adc8;
+}
+
+.customer-balance {
+  color: #22c55e;
+  font-weight: 600;
+}
+
+.customer-lending {
+  color: #f59e0b;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.denyut-signals-summary {
+  padding: 10px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 8px;
+}
+
+.denyut-signals-summary h4 {
+  font-size: 13px;
+  color: #cdd6f4;
+  margin: 0 0 8px;
+}
+
+.signal-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.signal-filter-btn {
+  padding: 4px 8px;
+  border: 1px solid;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.signal-filter-btn.active {
+  background: rgba(255,255,255,0.15);
+  font-weight: 600;
+}
+
+.denyut-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 200px;
+  width: 100%;
+  padding: 2rem;
+  text-align: center;
+  color: #94a3b8;
+  box-sizing: border-box;
+}
+
+.denyut-empty .upload-icon {
+  font-size: 4rem;
+  margin-bottom: 1rem;
+  opacity: 0.5;
+}
+
+.denyut-empty h2 {
+  margin: 0 0 0.5rem;
+  color: #e2e8f0;
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.denyut-empty p {
+  margin: 0.25rem 0;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.denyut-empty .denyut-hint {
+  font-size: 12px;
+  color: #60a5fa;
+}
+
+.denyut-quick-stats {
+  display: flex;
+  gap: 24px;
+  margin-top: 1.5rem;
+  padding: 1rem 2rem;
+  background: rgba(255,255,255,0.05);
+  border-radius: 12px;
+}
+
+.denyut-quick-stats div {
+  font-size: 13px;
+  color: #cdd6f4;
+}
+
+.denyut-detail {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.denyut-detail-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #1e1e2e;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  z-index: 100;
+}
+
+.detail-back {
+  padding: 6px 12px;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 6px;
+  color: #cdd6f4;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.detail-customer-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.detail-customer-info h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #cdd6f4;
+}
+
+.detail-cifno {
+  font-size: 11px;
+  color: #6c7086;
+  font-family: monospace;
+}
+
+.detail-segment, .detail-branch {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.05);
+}
+
+.denyut-detail-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.detail-left {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.detail-right {
+  width: 320px;
+  min-width: 320px;
+  min-height: 0;
+  border-left: 1px solid rgba(255,255,255,0.1);
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.detail-section h4 {
+  font-size: 13px;
+  text-transform: uppercase;
+  color: #89b4fa;
+  margin: 0 0 10px;
+  letter-spacing: 0.5px;
+}
+
+.product-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.product-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 6px;
+  border-left: 3px solid;
+}
+
+.product-bar-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cdd6f4;
+  width: 60px;
+  flex-shrink: 0;
+}
+
+.product-bar-value {
+  font-size: 12px;
+  color: #22c55e;
+  font-weight: 600;
+  width: 80px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.product-bar-track {
+  flex: 1;
+  height: 6px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.product-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.year-comparison {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.year-card {
+  flex: 1;
+  min-width: 140px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.year-period {
+  font-size: 12px;
+  font-weight: 600;
+  color: #89b4fa;
+  margin-bottom: 4px;
+}
+
+.year-balance {
+  font-size: 16px;
+  font-weight: 700;
+  color: #cdd6f4;
+  margin-bottom: 4px;
+}
+
+.year-meta {
+  font-size: 10px;
+  color: #6c7086;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.year-change {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.conversion-widget {
+  text-align: center;
+  padding: 16px;
+  border-radius: 8px;
+  background: rgba(34,197,94,0.1);
+  border: 1px solid rgba(34,197,94,0.3);
+}
+
+.conversion-value {
+  font-size: 36px;
+  font-weight: bold;
+  color: #22c55e;
+}
+
+.conversion-label {
+  font-size: 11px;
+  color: #a6adc8;
+  margin-top: 4px;
+}
+
+.conversion-target {
+  font-size: 10px;
+  color: #6c7086;
+  margin-top: 2px;
+}
+
+.account-table h4 {
+  font-size: 13px;
+  color: #cdd6f4;
+  margin: 0 0 8px;
+}
+
+.account-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.03);
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+
+.account-type {
+  font-weight: 600;
+  width: 60px;
+  flex-shrink: 0;
+}
+
+.account-period {
+  color: #6c7086;
+  width: 60px;
+  flex-shrink: 0;
+}
+
+.account-balance {
+  color: #22c55e;
+  font-weight: 600;
+  flex: 1;
+  text-align: right;
+}
+
+.account-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  width: 70px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.signal-card {
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.03);
+  border-left: 3px solid #6b7280;
+  margin-bottom: 6px;
+}
+
+.signal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.signal-type {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cdd6f4;
+}
+
+.signal-urgency {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.signal-detail {
+  font-size: 11px;
+  color: #a6adc8;
+  margin-bottom: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.signal-detail strong {
+  color: #89b4fa;
+}
+
+.signal-status-select {
+  width: 100%;
+  padding: 4px 8px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid;
+  border-radius: 4px;
+  color: #cdd6f4;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.no-signals {
+  padding: 12px;
+  text-align: center;
+  color: #6c7086;
+  font-size: 12px;
+}
+
+.lending-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.lending-card {
+  background: rgba(255,255,255,0.03);
+  border-radius: 6px;
+  padding: 10px;
+  border-left: 3px solid #6b7280;
+}
+
+.lending-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.lending-type {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.lending-count {
+  font-size: 11px;
+  color: #6c7086;
+}
+
+.lending-limits {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.lending-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lending-label {
+  font-size: 10px;
+  color: #6c7086;
+  text-transform: uppercase;
+}
+
+.lending-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cdd6f4;
+}
