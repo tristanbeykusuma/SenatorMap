@@ -8,7 +8,7 @@ services:
   - type: web
     name: senator-map
     env: node
-    region: oregon
+    region: us-oregon
     plan: free
     # Render free tier: 0.5 GB RAM, 1 vCPU, 1 GB disk + 1 GB persistent disk
     # Persistent disk survives deploys/restarts — required for denyut.db + uploads
@@ -17,7 +17,7 @@ services:
       mountPath: /var/data
       sizeGB: 1
 
-    # Root of the repo = C:\Projects\SenatorMap (package.json here)
+    # Root of the repo
     root: .
 
     # Install deps for BOTH the client (Vite) and the server (Express),
@@ -42,9 +42,3 @@ services:
 
     # Health check — Render polls this; must return 200 for the service to be "up"
     healthCheckPath: /api/admin/status
-
-    # Auto-deploy on push to main
-    autoDeploy: true
-
-    # Keep the last 3 successful builds for fast rollbacks
-    numBuildWorkers: 1
