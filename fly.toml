@@ -1,0 +1,30 @@
+# Fly.io deployment config for Senator Map
+# Free tier: 256 MB RAM, 1 GB persistent volume, no card required.
+# Uses the Dockerfile in the repo root.
+#
+# Docs: https://fly.io/docs/flyio/guides/multi-tenant-container-images/
+
+app = "senator-map"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  NODE_ENV = "production"
+  DB_PATH = "/data/denyut.db"
+  ROOT_DB_PATH = "/data/denyut.db"
+  UPLOAD_DIR = "/data/uploads"
+
+[http_service]
+  internal_port = 8080
+  # Health check — Fly polls this; must return 200
+  health_checks = [[{ path = "/api/admin/status", interval = "10s", timeout = "2s" }]]
+
+[mounts]
+  source = "senator-map-data"
+  destination = "/data"
+
+[processes]
+  app = "node index.js"
