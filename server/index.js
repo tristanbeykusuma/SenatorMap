@@ -20,8 +20,27 @@ const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'denyut.db');
 const ROOT_DB_PATH = process.env.ROOT_DB_PATH || path.join(__dirname, '..', 'denyut.db');
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
 
+// The database file and the multer upload dir must exist before opening/using
+// them. On Fly.io both live on a mounted volume at /data, so create them
+// defensively instead of assuming the deploy pre-seeded the directories.
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
 const db = new Database(DB_PATH);
-const rootDb = new Database(ROOT_DB_PATH);
+db.pragma('journal_mode = WAL');
+db.pragma('busy_timeout = 5000');
+
+// ROOT_DB_PATH is a legacy/optional secondary connection. When it resolves to
+// the same file as DB_PATH (the container default) opening it twice would
+// create a second writer on the same SQLite file, so reuse the primary handle.
+let rootDb = db;
+try {
+  if (path.resolve(ROOT_DB_PATH) !== path.resolve(DB_PATH)) {
+    rootDb = new Database(ROOT_DB_PATH);
+  }
+} catch (err) {
+  console.warn('[db] ROOT_DB_PATH unavailable, continuing with primary only:', err.message);
+}
 
 const upload = multer({ dest: UPLOAD_DIR });
 

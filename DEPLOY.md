@@ -1,90 +1,236 @@
-# Senator Map — Deployment Guide
+# Senator Map — Deployment Guide (Fly.io)
 
-Two deployment paths, both verified locally:
+Target: **Fly.io free tier** — one `shared-cpu-1x` machine with a 1 GB
+persistent volume. No credit card required.
 
-| Path | Config | Best for |
-|------|--------|----------|
-| **Render Blueprint** (recommended) | `render.yaml` | One-click free deploy, no Docker daemon needed |
-| **Docker / container** | `Dockerfile` | Fly.io, AWS ECS, a VPS, or self-hosted |
+| File | Role |
+|------|------|
+| `fly.toml` | App, region, env, health check, volume mount, deploy strategy |
+| `Dockerfile` | Multi-stage build: compiles the SPA, then a slim runtime image |
+| `docker-entrypoint.sh` | Fixes volume ownership, drops to a non-root user |
+| `.dockerignore` | Keeps the build context small |
 
-Both produce the same artifact: a Node 24 Express server that serves the
-Vite SPA from `server/dist` and the `/api/*` routes, backed by
-`better-sqlite3` on a persistent disk at `/var/data`.
-
----
-
-## Path 1 — Render (free)
-
-1. Sign up at [render.com](https://render.com) and connect your GitHub repo.
-2. Click **New** → **Blueprint**. Render reads `render.yaml` automatically.
-3. The free plan is selected by default. Click **Create**.
-4. Build runs:
-   - `cd server/client && npm install && npm run build` (SPA → `server/dist`)
-   - `cd ../ && npm install` (Express deps)
-   - `cd server && npm start`
-5. A 1 GB persistent disk is created at `/var/data`. `denyut.db` and
-   `uploads/` live there and survive deploys/restarts.
-6. Health check polls `/api/admin/status`. Once 200, the site is live at
-   `https://senator-map-xxxx.onrender.com`.
-
-### Custom domain + SSL (Render)
-
-Render issues **automatic Let's Encrypt SSL** for custom domains on the free
-tier — no extra config needed.
-
-1. In the Render dashboard, open the service → **Settings** → **Custom Domain**.
-2. Add your domain (e.g. `senator.map`).
-3. Add the CNAME record Render shows at your DNS provider:
-   ```
-   senator  CNAME  xxx.onrender.com
-   ```
-4. Render auto-provisions the SSL certificate. HTTPS is live once the DNS
-   record propagates (usually < 5 min).
+Everything below was verified locally with the exact image Fly will run.
 
 ---
 
-## Path 2 — Docker (Fly.io / ECS / VPS)
+## Architecture
 
-```sh
+A single Node 24 Express process that:
+
+- serves the Vite SPA from `server/dist` (built inside the image), and
+- serves `/api/*` routes, backed by `better-sqlite3` on `/data/denyut.db`.
+
+`/data` is a Fly volume, so `denyut.db` and `uploads/` survive restarts and
+redeploys. The SQLite schema is created automatically on first boot, so no
+data migration step is required.
+
+---
+
+## One-time setup
+
+### 1. Install flyctl
+
+```powershell
+iwr https://fly.io/install.ps1 -useb | iex
+```
+
+Then **open a new PowerShell window** (PATH is set for new shells only).
+Verify:
+
+```powershell
+fly version
+```
+
+### 2. Create a Fly account
+
+Go to <https://fly.io/app/sign-up> and sign up (no card), or:
+
+```powershell
+fly auth signup
+```
+
+### 3. Confirm the app name is free
+
+`app = "senator-map-denyut"` in `fly.toml` is a global name on Fly. Check:
+
+```powershell
+fly apps list | Select-String "senator-map-denyut"
+```
+
+If the name is taken, edit the `app` line in `fly.toml` to something unique
+(e.g. `senator-map-denyut-<yourname>`) before continuing. Nothing else needs
+to change.
+
+---
+
+## First deploy
+
+```powershell
+cd C:\Projects\SenatorMap
+
+# 1. Create the app. Do NOT use `fly launch` — it rewrites fly.toml.
+fly apps create senator-map-denyut
+
+# 2. Create the 1 GB volume in the same region as primary_region ("sin").
+fly volumes create senator_map_data --size 1 --region sin
+
+# 3. Deploy.
+fly deploy --build-timeout 20m
+```
+
+`-a senator-map-denyut` is not needed — flyctl reads the name from `fly.toml`.
+
+Your site is then live at **https://senator-map-denyut.fly.dev**
+
+### Verify the deploy
+
+```powershell
+fly status
+fly logs -a senator-map-denyut          # Ctrl-C to stop following
+(Invoke-WebRequest https://senator-map-denyut.fly.dev/api/admin/status).Content
+```
+
+Expected:
+
+```json
+{"status":"ok","timestamp":"...","data":{"customers":0,"accounts":0,"signals":0}}
+```
+
+The database starts empty by design. Load your data in the app:
+
+1. Open the site → **Denyut** tab → upload the senator and denyut workbooks.
+2. Open the **Radar** tab → upload `REKAM MEDIS CABANG JULI 2026.xlsx`
+   (should report 41 branches).
+
+---
+
+## Updating the app later
+
+```powershell
+cd C:\Projects\SenatorMap
+git pull
+fly deploy --build-timeout 20m
+```
+
+The volume keeps all data across the new release.
+
+---
+
+## Custom domain + SSL
+
+1. Add the domain to Fly:
+   ```powershell
+   fly certs add senator-map.com --app senator-map-denyut
+   ```
+2. At your DNS provider add the A record Fly shows:
+   ```
+   senator-map.com   A   <the IPv4 from fly certs add>
+   senator-map.com   AAAA <the IPv6 from fly certs add>
+   ```
+3. Fly provisions Let's Encrypt automatically once DNS resolves (usually
+   under 5 minutes). No container config needed.
+
+---
+
+## Why each setting is in `fly.toml`
+
+These are the settings that make a volume-backed deploy fail if left at the
+defaults. Each one is deliberate:
+
+| Setting | Reason |
+|---------|--------|
+| `[deploy] strategy = "immediate"` | A machine holding a volume cannot take part in a rolling deploy. `canary` and `bluegreen` are explicitly rejected with volumes. |
+| `[[mounts]] initial_size = "1gb"` | If the volume is missing, `fly deploy` creates it instead of erroring. |
+| `[[mounts]] source = "senator_map_data"` | Volume name must match the one from `fly volumes create`. |
+| `auto_stop_machines = false` | The app owns a volume and must stay reachable. |
+| `min_machines_running = 1` | Guarantees one machine in the primary region. |
+| `[[http_service.checks]] path = "/api/admin/status"` | Health endpoint returns 200 unauthenticated. |
+| `[http_service] force_https = true` | Redirects plain HTTP to HTTPS. |
+| `kill_signal` / `kill_timeout` | Gives Node time to close SQLite on redeploy. |
+| `ENTRYPOINT` in the Dockerfile | Fly sends `SIGINT` to PID 1; `tini` forwards it to Node. |
+
+---
+
+## Troubleshooting
+
+### `no access token available`
+
+```powershell
+fly auth login
+```
+
+### `failed to run migrations` / `no volume found for senator_map_data`
+
+The volume is missing or in the wrong region:
+
+```powershell
+fly volumes create senator_map_data --size 1 --region sin
+```
+
+### `Error: no changes to deploy`
+
+Nothing new was built. Check `git status` — the image is rebuilt from your
+working tree, so uncommitted changes are still deployed.
+
+### `unable to open database file` in the logs
+
+The volume is owned by root and the app runs as `appuser`. `docker-entrypoint.sh`
+fixes this at boot. If you see it, the entrypoint was bypassed — check that
+`ENTRYPOINT` is still present in the `Dockerfile`.
+
+### Deploy times out
+
+The native `better-sqlite3` compile plus the Vite build can exceed Fly's
+default build timeout on a cold cache. That is what `--build-timeout 20m` is
+for. A retry after the first build is much faster (cached layers).
+
+### Health checks failing after deploy
+
+`fly logs` shows the reason. The most common cause is a slow first boot while
+SQLite initialises; `grace_period = "15s"` covers this. Raise it if the app
+takes longer on a cold volume.
+
+### Start over completely
+
+```powershell
+fly apps destroy senator-map-denyut --yes
+fly apps create senator-map-denyut
+fly volumes create senator_map_data --size 1 --region sin
+fly deploy --build-timeout 20m
+```
+
+This deletes the volume and all data. Export anything you need first.
+
+---
+
+## Local Docker (no Fly account)
+
+```powershell
 docker build -t senator-map .
-docker run -d --name senator-map -p 8080:8080 \
-  -e DB_PATH=/data/denyut.db \
-  -v senator-map-data:/data \
-  senator-map:latest
+docker run -d --name senator-map -p 8080:8080 -v senator-map-data:/data senator-map
 ```
 
-- Volume `/data` holds `denyut.db` and `uploads/` — survives restarts.
-- Port 8080, env vars are set in the image defaults; override with `-e`.
-- Verified: `GET /api/admin/status` → 200, `GET /radar` → SPA, and
-  `POST /api/upload/radar` → 41 branches.
+Equivalent verification:
 
-### Fly.io (free tier, 256 MB)
-
-```sh
-fly launch   # creates fly.toml from the Dockerfile
-fly volumes create senator-map-data --size 1
-fly deploy
+```powershell
+(Invoke-WebRequest http://127.0.0.1:8080/api/admin/status).Content
+curl.exe -X POST -F "file=@C:\Projects\SenatorMap\REKAM MEDIS CABANG JULI 2026.xlsx" http://127.0.0.1:8080/api/upload/radar
 ```
-
-### AWS ECS / any VPS
-
-Push the image to ECR (or Docker Hub) and run it on a Fargate task or an EC2
-instance with a target group on port 8080. Mount an EFS volume at `/data`.
 
 ---
 
 ## Environment variables
 
-| Var | Default | Purpose |
-|-----|---------|---------|
-| `PORT` | injected by platform | Listen port |
+| Var | Default (deploy) | Purpose |
+|-----|------------------|---------|
+| `PORT` | `8080` | Listen port |
 | `HOST` | `0.0.0.0` | Bind address |
-| `DB_PATH` | `/data/denyut.db` (deploy) | SQLite file |
-| `ROOT_DB_PATH` | `/data/denyut.db` (deploy) | Root DB copy |
-| `UPLOAD_DIR` | `/data/uploads` (deploy) | File upload dir |
-| `NODE_ENV` | `production` | Express env |
+| `DB_PATH` | `/data/denyut.db` | SQLite file |
+| `ROOT_DB_PATH` | `/data/denyut.db` | Legacy secondary handle; reuses `DB_PATH` when identical |
+| `UPLOAD_DIR` | `/data/uploads` | multer upload directory |
+| `DATA_DIR` | `/data` | Volume root, chowned by the entrypoint |
+| `NODE_OPTIONS` | `--max-old-space-size=512` | Heap cap for a 1 GB machine |
 
-## Health check
-
-`GET /api/admin/status` returns `{"status":"ok",...}` — used by Render and
-any other platform as the readiness probe.
+The server creates `DB_PATH`'s directory and `UPLOAD_DIR` on boot, so a fresh
+volume needs no manual setup.

@@ -1,30 +1,74 @@
-# Fly.io deployment config for Senator Map
-# Free tier: 256 MB RAM, 1 GB persistent volume, no card required.
-# Uses the Dockerfile in the repo root.
+# Fly.io configuration for Senator Map.
 #
-# Docs: https://fly.io/docs/flyio/guides/multi-tenant-container-images/
+# Single machine + one persistent volume at /data. The volume holds
+# denyut.db and uploads/, so the database survives every restart and release.
+#
+# Do NOT run `fly launch` here: it rewrites fly.toml. The app already exists,
+# so create and deploy explicitly:
+#
+#   fly apps create senator-map-denyut
+#   fly volumes create senator_map_data --size 1 --region sin
+#   fly deploy
+#
+# `app` is global on Fly.io. If the name below is taken, change it here (and
+# nothing else) before deploying.
 
-app = "senator-map"
-primary_region = "ord"
+app = "senator-map-denyut"
+primary_region = "sin"
 
 [build]
   dockerfile = "Dockerfile"
 
 [env]
-  PORT = "8080"
   NODE_ENV = "production"
+  PORT = "8080"
+  HOST = "0.0.0.0"
+  DATA_DIR = "/data"
   DB_PATH = "/data/denyut.db"
   ROOT_DB_PATH = "/data/denyut.db"
   UPLOAD_DIR = "/data/uploads"
+  NODE_OPTIONS = "--max-old-space-size=512"
+
+# A machine that owns a volume cannot take part in a rolling deploy, so the
+# release command is always "immediate". This is what keeps `fly deploy` from
+# failing with "this app has machines with volumes".
+[deploy]
+  strategy = "immediate"
+  wait_timeout = "300s"
 
 [http_service]
   internal_port = 8080
-  # Health check — Fly polls this; must return 200
-  health_checks = [[{ path = "/api/admin/status", interval = "10s", timeout = "2s" }]]
+  force_https = true
+  # Never idle-stop: the app owns a volume and must stay reachable.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
 
-[mounts]
-  source = "senator-map-data"
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "15s"
+    method = "GET"
+    path = "/api/admin/status"
+    timeout = "5s"
+
+[[mounts]]
+  source = "senator_map_data"
   destination = "/data"
+  # Let `fly deploy` create the volume on the first release if it is missing,
+  # so the deploy never fails with "no volume found for senator_map_data".
+  initial_size = "1gb"
 
-[processes]
-  app = "node index.js"
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
+
+# Give Node a moment to close SQLite and finish in-flight uploads on deploy.
+kill_signal = "SIGINT"
+kill_timeout = "30s"
