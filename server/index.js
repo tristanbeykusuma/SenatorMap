@@ -3,11 +3,11 @@ import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import Database from 'better-sqlite3';
 import multer from 'multer';
 import streamZip from 'node-stream-zip';
 import sax from 'sax';
 import XLSX from 'xlsx';
+import { db, initDatabase, isRemote, writeBatch } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -16,33 +16,24 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'denyut.db');
-const ROOT_DB_PATH = process.env.ROOT_DB_PATH || path.join(__dirname, '..', 'denyut.db');
+// Uploads are scratch space: every workbook is parsed once, in the request
+// that received it, and then discarded. Nothing reads these files again, which
+// is what lets the app run on a host with no persistent disk.
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
-
-// The database file and the multer upload dir must exist before opening/using
-// them. On Fly.io both live on a mounted volume at /data, so create them
-// defensively instead of assuming the deploy pre-seeded the directories.
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('busy_timeout = 5000');
-
-// ROOT_DB_PATH is a legacy/optional secondary connection. When it resolves to
-// the same file as DB_PATH (the container default) opening it twice would
-// create a second writer on the same SQLite file, so reuse the primary handle.
-let rootDb = db;
-try {
-  if (path.resolve(ROOT_DB_PATH) !== path.resolve(DB_PATH)) {
-    rootDb = new Database(ROOT_DB_PATH);
-  }
-} catch (err) {
-  console.warn('[db] ROOT_DB_PATH unavailable, continuing with primary only:', err.message);
-}
-
 const upload = multer({ dest: UPLOAD_DIR });
+
+// Express 4 does not catch rejected promises from async handlers, so every
+// route that touches the database is wrapped in this and routed to the error
+// handler instead of hanging.
+const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+function discardUpload(req) {
+  if (req.file && req.file.path) {
+    fs.promises.unlink(req.file.path).catch(() => {});
+  }
+}
 
 function colRefToNum(ref) {
   let num = 0;
@@ -457,134 +448,15 @@ function serializeEcosystem(ecosystem) {
   };
 }
 
-function initDb() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS customers (
-      cifno TEXT PRIMARY KEY,
-      name TEXT,
-      segment TEXT,
-      branch_code TEXT,
-      branch_name TEXT,
-      hub_id TEXT,
-      status TEXT,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS accounts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      cifno TEXT,
-      acctno TEXT,
-      actype TEXT,
-      template_period TEXT,
-      cbalrp REAL DEFAULT 0,
-      avgbalrp REAL DEFAULT 0,
-      rate REAL DEFAULT 0,
-      ddctyp TEXT,
-      datop6 TEXT,
-      status TEXT,
-      FOREIGN KEY (cifno) REFERENCES customers(cifno)
-    );
-    CREATE TABLE IF NOT EXISTS customer_balances (
-      cifno TEXT PRIMARY KEY,
-      cbalrp REAL DEFAULT 0,
-      avgbalrp REAL DEFAULT 0,
-      account_count INTEGER DEFAULT 0,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      product_breakdown TEXT
-    );
-    CREATE TABLE IF NOT EXISTS lending_balances (
-      cifno TEXT,
-      product_type TEXT,
-      limit_amount REAL DEFAULT 0,
-      outstanding_balance REAL DEFAULT 0,
-      account_count INTEGER DEFAULT 0,
-      PRIMARY KEY (cifno, product_type)
-    );
-    CREATE TABLE IF NOT EXISTS denyut_signals (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      cifno TEXT,
-      customer_name TEXT,
-      signal_type TEXT,
-      suggested_product TEXT,
-      urgency TEXT,
-      status TEXT DEFAULT 'new',
-      assigned_rm TEXT,
-      detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (cifno) REFERENCES customers(cifno)
-    );
-    CREATE TABLE IF NOT EXISTS default_data (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      data_type TEXT NOT NULL UNIQUE,
-      data TEXT NOT NULL,
-      stats TEXT,
-      uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS merchants (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT,
-      address TEXT,
-      lat REAL,
-      lng REAL,
-      status TEXT DEFAULT 'active'
-    );
-    CREATE TABLE IF NOT EXISTS merchant_sorot (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      merchant_id INTEGER,
-      reason TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (merchant_id) REFERENCES merchants(id)
-    );
-    CREATE TABLE IF NOT EXISTS echo_ecosystems (
-      id TEXT PRIMARY KEY,
-      anchor_name TEXT,
-      anchor_segment TEXT,
-      branch_code TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS echo_businesses (
-      id TEXT PRIMARY KEY,
-      ecosystem_id TEXT,
-      name TEXT,
-      segment TEXT,
-      business_type TEXT,
-      lat REAL,
-      lng REAL,
-      branch_code TEXT,
-      products_held TEXT,
-      ecommerce_potential REAL DEFAULT 0,
-      social_network_strength REAL DEFAULT 0,
-      priority_score REAL DEFAULT 0,
-      priority_tier TEXT,
-      mandiri_customer INTEGER DEFAULT 0,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (ecosystem_id) REFERENCES echo_ecosystems(id)
-    );
-    CREATE TABLE IF NOT EXISTS echo_relationships (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ecosystem_id TEXT,
-      from_business_id TEXT,
-      to_business_id TEXT,
-      relationship_type TEXT,
-      category TEXT,
-      transaction_value REAL DEFAULT 0,
-      transaction_volume INTEGER DEFAULT 0,
-      closed_loop INTEGER DEFAULT 0,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (ecosystem_id) REFERENCES echo_ecosystems(id),
-      FOREIGN KEY (from_business_id) REFERENCES echo_businesses(id),
-      FOREIGN KEY (to_business_id) REFERENCES echo_businesses(id)
-    );
-  `);
-}
-
 function streamParseTemplate(filePath, period) {
-  const stmtCustomer = db.prepare(`
+  const INSERT_CUSTOMER = `
     INSERT OR REPLACE INTO customers (cifno, name, segment, branch_code, branch_name, hub_id, status, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-  `);
-  const stmtAccount = db.prepare(`
+  `;
+  const INSERT_ACCOUNT = `
     INSERT INTO accounts (cifno, acctno, actype, template_period, cbalrp, avgbalrp, rate, ddctyp, datop6, status)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+  `;
   const batchCustomer = [];
   const batchAccount = [];
   const BATCH_SIZE = 10000;
@@ -602,23 +474,28 @@ function streamParseTemplate(filePath, period) {
     let worksheetProcessed = false;
     let worksheetRows = null;
 
-    function checkFinish() {
+    async function checkFinish() {
       if (ready && pendingStreams === 0 && !resolved) {
         resolved = true;
-        if (worksheetRows) {
-          processRows(worksheetRows, period);
-          for (let j = 0; j < batchCustomer.length; j += BATCH_SIZE) {
-            const chunkC = batchCustomer.splice(0, BATCH_SIZE);
-            const chunkA = batchAccount.splice(0, BATCH_SIZE);
-            const trans = db.transaction((bCust, bAcc) => {
-              for (const c of bCust) stmtCustomer.run(...c);
-              for (const a of bAcc) stmtAccount.run(...a);
-            });
-            trans(chunkC, chunkA);
+        try {
+          if (worksheetRows) {
+            processRows(worksheetRows, period);
+            for (let j = 0; j < batchCustomer.length; j += BATCH_SIZE) {
+              const chunkC = batchCustomer.splice(0, BATCH_SIZE);
+              const chunkA = batchAccount.splice(0, BATCH_SIZE);
+              const statements = [
+                ...chunkC.map((c) => ({ sql: INSERT_CUSTOMER, args: c })),
+                ...chunkA.map((a) => ({ sql: INSERT_ACCOUNT, args: a }))
+              ];
+              await writeBatch(statements);
+            }
           }
+          zip.close();
+          resolve(totalRows);
+        } catch (err) {
+          try { zip.close(); } catch { /* already closing */ }
+          reject(err);
         }
-        zip.close();
-        resolve(totalRows);
       }
     }
 
@@ -771,25 +648,27 @@ function streamParseTemplate(filePath, period) {
   }
 }
 
-app.get('/api/admin/status', (req, res) => {
+app.get('/api/admin/status', ah(async (req, res) => {
   const counts = {
-    customers: db.prepare('SELECT COUNT(*) as cnt FROM customers').get().cnt,
-    accounts: db.prepare('SELECT COUNT(*) as cnt FROM accounts').get().cnt,
-    signals: db.prepare('SELECT COUNT(*) as cnt FROM denyut_signals').get().cnt
+    customers: (await db.prepare('SELECT COUNT(*) as cnt FROM customers').get()).cnt,
+    accounts: (await db.prepare('SELECT COUNT(*) as cnt FROM accounts').get()).cnt,
+    signals: (await db.prepare('SELECT COUNT(*) as cnt FROM denyut_signals').get()).cnt
   };
   res.json({ status: 'ok', timestamp: new Date().toISOString(), data: counts });
-});
+}));
 
-app.post('/api/admin/upload/senator', upload.single('file'), async (req, res) => {
+app.post('/api/admin/upload/senator', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const stats = await streamParseTemplate(req.file.path, 'senator');
-    db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('senator', JSON.stringify([]), JSON.stringify({ processed: stats }));
+    await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('senator', JSON.stringify([]), JSON.stringify({ processed: stats }));
     res.json({ success: true, data: [], stats: { processed: stats } });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  } finally {
+    discardUpload(req);
   }
-});
+}));
 
 function parseRadarWorkbook(filePath) {
   return new Promise((resolve, reject) => {
@@ -902,101 +781,113 @@ function parseRadarWorkbook(filePath) {
   });
 }
 
-app.post('/api/admin/upload/radar', upload.single('file'), async (req, res) => {
+app.post('/api/admin/upload/radar', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const stats = await streamParseTemplate(req.file.path, 'radar');
-    db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('radar', JSON.stringify([]), JSON.stringify({ processed: stats }));
+    await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('radar', JSON.stringify([]), JSON.stringify({ processed: stats }));
     res.json({ success: true, data: [], stats: { processed: stats } });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  } finally {
+    discardUpload(req);
   }
-});
+}));
 
-app.post('/api/upload/radar', upload.single('file'), async (req, res) => {
+app.post('/api/upload/radar', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const branches = await parseRadarWorkbook(req.file.path);
     res.json({ success: true, data: branches, stats: { processed: branches.length } });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  } finally {
+    discardUpload(req);
   }
-});
+}));
 
-app.post('/api/admin/upload/denyut', upload.single('file'), async (req, res) => {
+app.post('/api/admin/upload/denyut', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const clear = req.query.clear === 'true';
   try {
     if (clear) {
-      db.exec('DELETE FROM denyut_signals');
+      await db.exec('DELETE FROM denyut_signals');
     }
     const stats = await streamParseTemplate(req.file.path, 'denyut');
     res.json({ success: true, data: [], stats: { processed: stats }, rowsProcessed: stats, periods: ['denyut'], cleared: clear });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  } finally {
+    discardUpload(req);
   }
-});
+}));
 
-app.get('/api/default/senator', (req, res) => {
-  const row = db.prepare('SELECT data FROM default_data WHERE data_type = ?').get(['senator']);
+app.get('/api/default/senator', ah(async (req, res) => {
+  const row = await db.prepare('SELECT data FROM default_data WHERE data_type = ?').get(['senator']);
   if (!row) return res.json({ data: null });
   try { res.json(JSON.parse(row.data)); } catch { res.status(500).json({ error: 'Invalid JSON' }); }
-});
+}));
 
-app.get('/api/default/radar', (req, res) => {
-  const row = db.prepare('SELECT data FROM default_data WHERE data_type = ?').get(['radar']);
+app.get('/api/default/radar', ah(async (req, res) => {
+  const row = await db.prepare('SELECT data FROM default_data WHERE data_type = ?').get(['radar']);
   if (!row) return res.json({ data: null });
   try { res.json(JSON.parse(row.data)); } catch { res.status(500).json({ error: 'Invalid JSON' }); }
-});
+}));
 
-app.get('/api/echo/ecosystems', (req, res) => {
-  const ecosystems = db.prepare('SELECT * FROM echo_ecosystems ORDER BY created_at DESC').all();
-  const result = ecosystems.map(eco => {
-    const businesses = db.prepare('SELECT * FROM echo_businesses WHERE ecosystem_id = ? ORDER BY name').all(eco.id);
-    const relationships = db.prepare('SELECT * FROM echo_relationships WHERE ecosystem_id = ? ORDER BY id').all(eco.id);
+app.get('/api/echo/ecosystems', ah(async (req, res) => {
+  const ecosystems = await db.prepare('SELECT * FROM echo_ecosystems ORDER BY created_at DESC').all();
+  const result = [];
+  for (const eco of ecosystems) {
+    const businesses = await db.prepare('SELECT * FROM echo_businesses WHERE ecosystem_id = ? ORDER BY name').all(eco.id);
+    const relationships = await db.prepare('SELECT * FROM echo_relationships WHERE ecosystem_id = ? ORDER BY id').all(eco.id);
     const serialized = serializeEcosystem({ ...eco, businesses, relationships });
-    return { ...serialized, metrics: calculateEchoMetrics(serialized) };
-  });
+    result.push({ ...serialized, metrics: calculateEchoMetrics(serialized) });
+  }
   res.json({ ecosystems: result });
-});
+}));
 
-app.get('/api/echo/ecosystems/:id', (req, res) => {
-  const eco = db.prepare('SELECT * FROM echo_ecosystems WHERE id = ?').get(req.params.id);
+app.get('/api/echo/ecosystems/:id', ah(async (req, res) => {
+  const eco = await db.prepare('SELECT * FROM echo_ecosystems WHERE id = ?').get(req.params.id);
   if (!eco) return res.status(404).json({ error: 'Ecosystem not found' });
-  const businesses = db.prepare('SELECT * FROM echo_businesses WHERE ecosystem_id = ? ORDER BY name').all(eco.id);
-  const relationships = db.prepare('SELECT * FROM echo_relationships WHERE ecosystem_id = ? ORDER BY id').all(eco.id);
+  const businesses = await db.prepare('SELECT * FROM echo_businesses WHERE ecosystem_id = ? ORDER BY name').all(eco.id);
+  const relationships = await db.prepare('SELECT * FROM echo_relationships WHERE ecosystem_id = ? ORDER BY id').all(eco.id);
   const serialized = serializeEcosystem({ ...eco, businesses, relationships });
   res.json({ ecosystem: serialized, metrics: calculateEchoMetrics(serialized) });
-});
+}));
 
-app.post('/api/echo/upload', upload.single('file'), async (req, res) => {
+app.post('/api/echo/upload', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const clear = req.query.clear === 'true';
   try {
     const parsed = await parseEchoWorkbook(req.file.path);
     if (clear) {
-      db.exec('DELETE FROM echo_relationships; DELETE FROM echo_businesses; DELETE FROM echo_ecosystems;');
+      await db.exec('DELETE FROM echo_relationships; DELETE FROM echo_businesses; DELETE FROM echo_ecosystems;');
     }
 
-    const insertEcosystem = db.prepare('INSERT INTO echo_ecosystems (id, anchor_name, anchor_segment, branch_code) VALUES (?, ?, ?, ?)');
-    const insertBusiness = db.prepare(`
+    const INSERT_ECOSYSTEM = 'INSERT INTO echo_ecosystems (id, anchor_name, anchor_segment, branch_code) VALUES (?, ?, ?, ?)';
+    const INSERT_BUSINESS = `
       INSERT INTO echo_businesses (
         id, ecosystem_id, name, segment, business_type, lat, lng, branch_code, products_held,
         ecommerce_potential, social_network_strength, priority_score, priority_tier, mandiri_customer
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const insertRelationship = db.prepare(`
+    `;
+    const INSERT_RELATIONSHIP = `
       INSERT INTO echo_relationships (
         ecosystem_id, from_business_id, to_business_id, relationship_type, category,
         transaction_value, transaction_volume, closed_loop
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    `;
 
-    const insertAll = db.transaction((ecosystems) => {
-      for (const eco of ecosystems) {
-        insertEcosystem.run(eco.id, eco.anchorName, eco.anchorSegment, eco.branchCode || '');
-        for (const b of eco.businesses) {
-          insertBusiness.run(
+    const statements = [];
+    for (const eco of parsed.ecosystems) {
+      statements.push({
+        sql: INSERT_ECOSYSTEM,
+        args: [eco.id, eco.anchorName, eco.anchorSegment, eco.branchCode || '']
+      });
+      for (const b of eco.businesses) {
+        statements.push({
+          sql: INSERT_BUSINESS,
+          args: [
             b.id,
             eco.id,
             b.name,
@@ -1011,10 +902,13 @@ app.post('/api/echo/upload', upload.single('file'), async (req, res) => {
             b.priorityScore || 0,
             b.priorityTier || 'Low',
             b.mandiriCustomer ? 1 : 0
-          );
-        }
-        for (const r of eco.relationships) {
-          insertRelationship.run(
+          ]
+        });
+      }
+      for (const r of eco.relationships) {
+        statements.push({
+          sql: INSERT_RELATIONSHIP,
+          args: [
             eco.id,
             r.fromBusinessId,
             r.toBusinessId,
@@ -1023,12 +917,13 @@ app.post('/api/echo/upload', upload.single('file'), async (req, res) => {
             r.transactionValue || 0,
             r.transactionVolume || 0,
             r.closedLoop ? 1 : 0
-          );
-        }
+          ]
+        });
       }
-    });
+    }
 
-    insertAll(parsed.ecosystems);
+    await writeBatch(statements);
+
     const enriched = parsed.ecosystems.map(eco => {
       const serialized = serializeEcosystem(eco);
       return { ...serialized, metrics: calculateEchoMetrics(serialized) };
@@ -1036,44 +931,46 @@ app.post('/api/echo/upload', upload.single('file'), async (req, res) => {
     res.json({ success: true, ...parsed.stats, ecosystems: enriched });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  } finally {
+    discardUpload(req);
   }
-});
+}));
 
-app.patch('/api/echo/businesses/:id', (req, res) => {
+app.patch('/api/echo/businesses/:id', ah(async (req, res) => {
   const { id } = req.params;
   const { mandiri_customer, mandiriCustomer, priority_score, priorityScore, business_type, businessType } = req.body;
-  const row = db.prepare('SELECT * FROM echo_businesses WHERE id = ?').get(id);
+  const row = await db.prepare('SELECT * FROM echo_businesses WHERE id = ?').get(id);
   if (!row) return res.status(404).json({ error: 'Business not found' });
   const isMandiri = mandiri_customer !== undefined ? mandiri_customer : mandiriCustomer;
   const prio = priority_score !== undefined ? priority_score : priorityScore;
   const btype = business_type !== undefined ? business_type : businessType;
-  if (isMandiri !== undefined) db.prepare('UPDATE echo_businesses SET mandiri_customer = ? WHERE id = ?').run(isMandiri ? 1 : 0, id);
-  if (prio !== undefined) db.prepare('UPDATE echo_businesses SET priority_score = ? WHERE id = ?').run(Number(prio), id);
-  if (btype !== undefined) db.prepare('UPDATE echo_businesses SET business_type = ? WHERE id = ?').run(String(btype), id);
-  const eco = db.prepare('SELECT * FROM echo_ecosystems WHERE id = ?').get(row.ecosystem_id);
-  const businesses = db.prepare('SELECT * FROM echo_businesses WHERE ecosystem_id = ? ORDER BY name').all(eco.id);
-  const relationships = db.prepare('SELECT * FROM echo_relationships WHERE ecosystem_id = ? ORDER BY id').all(eco.id);
+  if (isMandiri !== undefined) await db.prepare('UPDATE echo_businesses SET mandiri_customer = ? WHERE id = ?').run(isMandiri ? 1 : 0, id);
+  if (prio !== undefined) await db.prepare('UPDATE echo_businesses SET priority_score = ? WHERE id = ?').run(Number(prio), id);
+  if (btype !== undefined) await db.prepare('UPDATE echo_businesses SET business_type = ? WHERE id = ?').run(String(btype), id);
+  const eco = await db.prepare('SELECT * FROM echo_ecosystems WHERE id = ?').get(row.ecosystem_id);
+  const businesses = await db.prepare('SELECT * FROM echo_businesses WHERE ecosystem_id = ? ORDER BY name').all(eco.id);
+  const relationships = await db.prepare('SELECT * FROM echo_relationships WHERE ecosystem_id = ? ORDER BY id').all(eco.id);
   const serialized = serializeEcosystem({ ...eco, businesses, relationships });
   res.json({ ecosystem: serialized, metrics: calculateEchoMetrics(serialized) });
-});
+}));
 
-app.delete('/api/echo/ecosystems/:id', (req, res) => {
+app.delete('/api/echo/ecosystems/:id', ah(async (req, res) => {
   const { id } = req.params;
-  const row = db.prepare('SELECT * FROM echo_ecosystems WHERE id = ?').get(id);
+  const row = await db.prepare('SELECT * FROM echo_ecosystems WHERE id = ?').get(id);
   if (!row) return res.status(404).json({ error: 'Ecosystem not found' });
-  db.prepare('DELETE FROM echo_relationships WHERE ecosystem_id = ?').run(id);
-  db.prepare('DELETE FROM echo_businesses WHERE ecosystem_id = ?').run(id);
-  db.prepare('DELETE FROM echo_ecosystems WHERE id = ?').run(id);
+  await db.prepare('DELETE FROM echo_relationships WHERE ecosystem_id = ?').run(id);
+  await db.prepare('DELETE FROM echo_businesses WHERE ecosystem_id = ?').run(id);
+  await db.prepare('DELETE FROM echo_ecosystems WHERE id = ?').run(id);
   res.json({ success: true, deletedId: id });
-});
+}));
 
-app.get('/api/denyut/stats', (req, res) => {
-  const totalCustomers = db.prepare('SELECT COUNT(*) as cnt FROM customers').get().cnt;
-  const totalAccounts = db.prepare('SELECT COUNT(*) as cnt FROM accounts').get().cnt;
-  const totalSignals = db.prepare('SELECT COUNT(*) as cnt FROM denyut_signals').get().cnt;
-   const totalBalance = db.prepare('SELECT COALESCE(SUM(cbalrp), 0) as val FROM customer_balances').get().val;
+app.get('/api/denyut/stats', ah(async (req, res) => {
+  const totalCustomers = (await db.prepare('SELECT COUNT(*) as cnt FROM customers').get()).cnt;
+  const totalAccounts = (await db.prepare('SELECT COUNT(*) as cnt FROM accounts').get()).cnt;
+  const totalSignals = (await db.prepare('SELECT COUNT(*) as cnt FROM denyut_signals').get()).cnt;
+  const totalBalance = (await db.prepare('SELECT COALESCE(SUM(cbalrp), 0) as val FROM customer_balances').get()).val;
 
-  const signalRows = db.prepare(`
+  const signalRows = await db.prepare(`
     SELECT status, COUNT(*) as cnt FROM denyut_signals GROUP BY status
   `).all();
   const signalCounts = {};
@@ -1081,7 +978,7 @@ app.get('/api/denyut/stats', (req, res) => {
     signalCounts[row.status] = row.cnt;
   }
 
-  const urgencyRows = db.prepare(`
+  const urgencyRows = await db.prepare(`
     SELECT urgency, COUNT(*) as cnt FROM denyut_signals GROUP BY urgency
   `).all();
   const urgencyCounts = {};
@@ -1089,13 +986,13 @@ app.get('/api/denyut/stats', (req, res) => {
     urgencyCounts[row.urgency] = row.cnt;
   }
 
-  const periodRows = db.prepare(`
+  const periodRows = await db.prepare(`
     SELECT DISTINCT template_period FROM accounts ORDER BY template_period
   `).all();
   const periods = periodRows.map(r => r.template_period);
 
-  const totalLending = db.prepare('SELECT COALESCE(SUM(outstanding_balance), 0) as val FROM lending_balances').get().val;
-  const totalLendingAccounts = db.prepare('SELECT COUNT(*) as cnt FROM lending_balances').get().cnt;
+  const totalLending = (await db.prepare('SELECT COALESCE(SUM(outstanding_balance), 0) as val FROM lending_balances').get()).val;
+  const totalLendingAccounts = (await db.prepare('SELECT COUNT(*) as cnt FROM lending_balances').get()).cnt;
 
   res.json({
     totalCustomers,
@@ -1108,12 +1005,12 @@ app.get('/api/denyut/stats', (req, res) => {
     totalLending,
     totalLendingAccounts,
   });
-});
+}));
 
-app.get('/api/denyut/search', (req, res) => {
+app.get('/api/denyut/search', ah(async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.json({ customers: [] });
-  const results = db.prepare(`
+  const results = await db.prepare(`
     SELECT DISTINCT c.cifno, c.name, c.segment, c.branch_code, c.branch_name, c.hub_id, c.status,
       (SELECT COUNT(*) FROM accounts WHERE cifno = c.cifno) as account_count,
       (SELECT COALESCE(cb.cbalrp, 0) FROM customer_balances cb WHERE cb.cifno = c.cifno) as latest_balance,
@@ -1123,16 +1020,16 @@ app.get('/api/denyut/search', (req, res) => {
     LIMIT 50
   `).all(`%${q}%`, `%${q}%`);
   res.json({ customers: results });
-});
+}));
 
-app.get('/api/denyut/customer/:cifno', (req, res) => {
+app.get('/api/denyut/customer/:cifno', ah(async (req, res) => {
   const { cifno } = req.params;
-  const customer = db.prepare('SELECT c.*, (SELECT COUNT(*) FROM accounts WHERE cifno = c.cifno) as account_count, (SELECT COALESCE(cb.cbalrp, 0) FROM customer_balances cb WHERE cb.cifno = c.cifno) as latest_balance FROM customers c WHERE cifno = ?').get([cifno]);
+  const customer = await db.prepare('SELECT c.*, (SELECT COUNT(*) FROM accounts WHERE cifno = c.cifno) as account_count, (SELECT COALESCE(cb.cbalrp, 0) FROM customer_balances cb WHERE cb.cifno = c.cifno) as latest_balance FROM customers c WHERE cifno = ?').get([cifno]);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-  const portfolio = db.prepare('SELECT * FROM accounts WHERE cifno = ? ORDER BY template_period DESC').all([cifno]);
+  const portfolio = await db.prepare('SELECT * FROM accounts WHERE cifno = ? ORDER BY template_period DESC').all([cifno]);
 
-  const yearData = db.prepare(`
+  const yearData = await db.prepare(`
     SELECT template_period,
       COALESCE(SUM(CAST(cbalrp AS REAL)), 0) as total_balance,
       COALESCE(SUM(CAST(avgbalrp AS REAL)), 0) as avg_balance,
@@ -1144,11 +1041,11 @@ app.get('/api/denyut/customer/:cifno', (req, res) => {
     ORDER BY template_period
   `).all([cifno]);
 
-  const signals = db.prepare('SELECT * FROM denyut_signals WHERE cifno = ? ORDER BY detected_at DESC').all([cifno]);
+  const signals = await db.prepare('SELECT * FROM denyut_signals WHERE cifno = ? ORDER BY detected_at DESC').all([cifno]);
 
-  const lendingPortfolio = db.prepare('SELECT * FROM lending_balances WHERE cifno = ? ORDER BY outstanding_balance DESC').all([cifno]);
+  const lendingPortfolio = await db.prepare('SELECT * FROM lending_balances WHERE cifno = ? ORDER BY outstanding_balance DESC').all([cifno]);
 
-  const balanceBreakdown = db.prepare('SELECT product_breakdown FROM customer_balances WHERE cifno = ?').get([cifno]);
+  const balanceBreakdown = await db.prepare('SELECT product_breakdown FROM customer_balances WHERE cifno = ?').get([cifno]);
 
   let productBreakdown = {};
   if (balanceBreakdown && balanceBreakdown.product_breakdown) {
@@ -1160,9 +1057,9 @@ app.get('/api/denyut/customer/:cifno', (req, res) => {
   }
 
   res.json({ customer, portfolio, yearData, signals, lendingPortfolio, productBreakdown });
-});
+}));
 
-app.patch('/api/denyut/signal/:id', (req, res) => {
+app.patch('/api/denyut/signal/:id', ah(async (req, res) => {
   const { id } = req.params;
   const { status, assigned_rm } = req.body;
   const updates = [];
@@ -1171,52 +1068,56 @@ app.patch('/api/denyut/signal/:id', (req, res) => {
   if (assigned_rm !== undefined) { updates.push('assigned_rm = ?'); params.push(assigned_rm); }
   if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
   params.push(id);
-  db.prepare(`UPDATE denyut_signals SET ${updates.join(', ')} WHERE id = ?`).run(...params);
-  const updated = db.prepare('SELECT * FROM denyut_signals WHERE id = ?').get([id]);
+  await db.prepare(`UPDATE denyut_signals SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  const updated = await db.prepare('SELECT * FROM denyut_signals WHERE id = ?').get([id]);
   res.json(updated);
-});
+}));
 
-app.post('/api/upload/preview', upload.single('file'), async (req, res) => {
+app.post('/api/upload/preview', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const data = await previewXlsx(req.file.path);
     res.json(data);
   } catch (e) {
     res.status(500).json({ error: e.message });
+  } finally {
+    discardUpload(req);
   }
-});
+}));
 
-app.post('/api/upload/confirm', upload.single('file'), async (req, res) => {
+app.post('/api/upload/confirm', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const result = await parseSenatorMapData(req.file.path);
     res.json({ success: true, data: result.data, stats: result.stats });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  } finally {
+    discardUpload(req);
   }
-});
+}));
 
-app.patch('/api/merchants/:id/status', (req, res) => {
+app.patch('/api/merchants/:id/status', ah(async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
-  db.prepare('UPDATE merchants SET status = ? WHERE id = ?').run(status, id);
-  const updated = db.prepare('SELECT * FROM merchants WHERE id = ?').get([id]);
+  await db.prepare('UPDATE merchants SET status = ? WHERE id = ?').run(status, id);
+  const updated = await db.prepare('SELECT * FROM merchants WHERE id = ?').get([id]);
   res.json(updated);
-});
+}));
 
-app.patch('/api/merchants/:id/sorot', (req, res) => {
+app.patch('/api/merchants/:id/sorot', ah(async (req, res) => {
   const { id } = req.params;
   const { reason } = req.body;
-  db.prepare('INSERT INTO merchant_sorot (merchant_id, reason) VALUES (?, ?)').run(id, reason);
-  const merchant = db.prepare('SELECT * FROM merchants WHERE id = ?').get([id]);
-  const sorot = db.prepare('SELECT * FROM merchant_sorot WHERE merchant_id = ? ORDER BY created_at DESC').all([id]);
+  await db.prepare('INSERT INTO merchant_sorot (merchant_id, reason) VALUES (?, ?)').run(id, reason);
+  const merchant = await db.prepare('SELECT * FROM merchants WHERE id = ?').get([id]);
+  const sorot = await db.prepare('SELECT * FROM merchant_sorot WHERE merchant_id = ? ORDER BY created_at DESC').all([id]);
   res.json({ merchant, sorot });
-});
+}));
 
-app.get('/api/merchants', (req, res) => {
-  const merchants = db.prepare('SELECT * FROM merchants ORDER BY id LIMIT 100').all();
+app.get('/api/merchants', ah(async (req, res) => {
+  const merchants = await db.prepare('SELECT * FROM merchants ORDER BY id LIMIT 100').all();
   res.json(merchants);
-});
+}));
 
 function previewXlsx(filePath) {
   return new Promise((resolve, reject) => {
@@ -1242,6 +1143,14 @@ function previewXlsx(filePath) {
   });
 }
 
+// Catches anything an async route rejected, so a database failure returns a
+// 500 instead of leaving the request hanging.
+app.use((err, req, res, next) => {
+  console.error('[api]', req.method, req.originalUrl, '-', err.message);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: err.message || 'Internal server error' });
+});
+
 // Serve the production frontend build (client/dist) for all non-API routes.
 const DIST_DIR = path.join(__dirname, 'dist');
 if (fs.existsSync(DIST_DIR)) {
@@ -1252,10 +1161,18 @@ if (fs.existsSync(DIST_DIR)) {
   });
 }
 
-initDb();
-
 const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || '0.0.0.0';
-app.listen(PORT, HOST, () => {
-  console.log(`Server running on ${HOST}:${PORT}`);
-});
+
+// The schema is created before the port opens so the health check cannot pass
+// against a half-initialised database.
+initDatabase()
+  .then(() => {
+    app.listen(PORT, HOST, () => {
+      console.log(`Server running on ${HOST}:${PORT} (db: ${isRemote ? 'remote libsql' : 'local file'})`);
+    });
+  })
+  .catch((err) => {
+    console.error('Database initialisation failed:', err);
+    process.exit(1);
+  });

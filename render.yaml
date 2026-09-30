@@ -1,0 +1,35 @@
+# Senator Map on Render's free tier.
+#
+# No credit card required. The free plan has an EPHEMERAL filesystem and no
+# persistent disk option, which is why the app no longer stores a local
+# SQLite file: all data lives in a remote Turso/libSQL database and uploaded
+# workbooks are parsed in-request and deleted.
+#
+# Deploy: New -> Blueprint -> point Render at this repo. Set the two TURSO_*
+# env vars when prompted (they are marked sync: false, so Render asks).
+
+services:
+  - type: web
+    name: senator-map
+    runtime: node
+    plan: free
+    region: singapore
+
+    # Render runs this from the repo root.
+    buildCommand: cd server/client && npm ci && npm run build && cd ../.. && cd server && npm ci --omit=dev
+    startCommand: cd server && node index.js
+
+    # Health check. Also the endpoint Fly/Render-style platforms probe.
+    healthCheckPath: /api/admin/status
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Uploads are scratch space, so any writable path works. /tmp is the
+      # only reliably writable location on the free tier.
+      - key: UPLOAD_DIR
+        value: /tmp/uploads
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false

@@ -1,17 +1,17 @@
-# Fly.io configuration for Senator Map.
+# Fly.io configuration for Senator Map — REQUIRES A CREDIT CARD.
 #
-# Single machine + one persistent volume at /data. The volume holds
-# denyut.db and uploads/, so the database survives every restart and release.
+# Fly removed its no-card free tier: new organisations must add a payment
+# method before an app can be created, and the free trial is limited to
+# 2 VM hours or 7 days. If you have no card, use render.yaml instead — it
+# deploys the same stateless app on Render's free tier with no payment info.
 #
-# Do NOT run `fly launch` here: it rewrites fly.toml. The app already exists,
-# so create and deploy explicitly:
+# If you do add a card, this config works as-is and needs no volume at all,
+# because the database is remote (Turso) and uploads are disposable.
 #
 #   fly apps create senator-map-denyut
-#   fly volumes create senator_map_data --size 1 --region sin
 #   fly deploy
 #
-# `app` is global on Fly.io. If the name below is taken, change it here (and
-# nothing else) before deploying.
+# Never run `fly launch` here: it rewrites this file.
 
 app = "senator-map-denyut"
 primary_region = "sin"
@@ -23,26 +23,18 @@ primary_region = "sin"
   NODE_ENV = "production"
   PORT = "8080"
   HOST = "0.0.0.0"
-  DATA_DIR = "/data"
-  DB_PATH = "/data/denyut.db"
-  ROOT_DB_PATH = "/data/denyut.db"
-  UPLOAD_DIR = "/data/uploads"
-  NODE_OPTIONS = "--max-old-space-size=512"
-
-# A machine that owns a volume cannot take part in a rolling deploy, so the
-# release command is always "immediate". This is what keeps `fly deploy` from
-# failing with "this app has machines with volumes".
-[deploy]
-  strategy = "immediate"
-  wait_timeout = "300s"
+  UPLOAD_DIR = "/tmp/uploads"
+  NODE_OPTIONS = "--max-old-space-size=384"
+  # TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be set separately, because
+  # secrets do not belong in a committed file:
+  #   fly secrets set TURSO_DATABASE_URL=libsql://... TURSO_AUTH_TOKEN=...
 
 [http_service]
   internal_port = 8080
   force_https = true
-  # Never idle-stop: the app owns a volume and must stay reachable.
-  auto_stop_machines = false
+  auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
 
   [http_service.concurrency]
     type = "requests"
@@ -56,19 +48,11 @@ primary_region = "sin"
     path = "/api/admin/status"
     timeout = "5s"
 
-[[mounts]]
-  source = "senator_map_data"
-  destination = "/data"
-  # Let `fly deploy` create the volume on the first release if it is missing,
-  # so the deploy never fails with "no volume found for senator_map_data".
-  initial_size = "1gb"
-
 [[vm]]
   size = "shared-cpu-1x"
   memory = "1gb"
   cpu_kind = "shared"
   cpus = 1
 
-# Give Node a moment to close SQLite and finish in-flight uploads on deploy.
 kill_signal = "SIGINT"
 kill_timeout = "30s"

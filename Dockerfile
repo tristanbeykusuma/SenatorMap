@@ -1,20 +1,22 @@
 # syntax=docker/dockerfile:1
 #
-# Senator Map — production image (Fly.io / any Docker host).
+# Senator Map — production image for any Docker host (Render, Koyeb, ECS, VPS).
 #
 #   docker build -t senator-map .
-#   docker run -p 8080:8080 -v senator-map-data:/data senator-map
+#   docker run -p 8080:8080 -e TURSO_DATABASE_URL=... -e TURSO_AUTH_TOKEN=... senator-map
 #
-# /data holds denyut.db and uploads/ on a persistent volume, so the database
-# and uploaded workbooks survive restarts, rebuilds, and new releases.
+# The app is stateless: all persistent data lives in a remote Turso/libSQL
+# database, and uploaded workbooks are parsed in-request and then deleted. So
+# no volume is required and the container can run on an ephemeral filesystem.
 
 # ---------------------------------------------------------------- build stage
 FROM node:24-alpine AS builder
 
 WORKDIR /app
 
-# better-sqlite3 is a native module: it needs Python and a C++ toolchain to
-# compile from source when no prebuild matches musl/node 24.
+# The toolchain is kept only in the builder. @libsql/client ships prebuilt
+# binaries, but a toolchain here means the build still succeeds on musl
+# architectures where no prebuild matches.
 RUN apk add --no-cache python3 make g++
 
 COPY server/package.json server/package-lock.json ./server/
@@ -35,12 +37,16 @@ FROM node:24-alpine AS runtime
 
 WORKDIR /app
 
-# su-exec lets the container start as root, fix ownership on the mounted
-# volume, then drop to an unprivileged user before running Node.
+# tini forwards SIGTERM/SIGINT to Node so the process shuts down cleanly.
 RUN apk add --no-cache su-exec tini
 
-COPY --from=builder /app/server ./server
+# Copy only what the server actually runs: its sources, its production
+# dependencies, and the built SPA. Copying the whole `server` directory here
+# would drag ~139 MB of client build tooling into the runtime image.
+COPY --from=builder /app/server/*.js ./server/
+COPY --from=builder /app/server/package.json /app/server/package-lock.json ./server/
 COPY --from=builder /app/server/node_modules ./server/node_modules
+COPY --from=builder /app/server/dist ./server/dist
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
@@ -48,15 +54,17 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 RUN addgroup -g 1001 -S appgroup \
     && adduser -u 1001 -S appuser -G appgroup \
     && chown -R appuser:appgroup /app \
-    && mkdir -p /data/uploads \
-    && chown -R appuser:appgroup /data
+    && mkdir -p /tmp/uploads \
+    && chown -R appuser:appgroup /tmp/uploads
 
 ENV NODE_ENV=production \
     PORT=8080 \
     HOST=0.0.0.0 \
-    DB_PATH=/data/denyut.db \
-    ROOT_DB_PATH=/data/denyut.db \
-    UPLOAD_DIR=/data/uploads
+    UPLOAD_DIR=/tmp/uploads \
+    NODE_OPTIONS=--max-old-space-size=384
+
+# TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are NOT baked in here. Supply them
+# at run time, or the server falls back to a local file database.
 
 EXPOSE 8080
 
