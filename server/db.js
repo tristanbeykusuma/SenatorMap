@@ -16,7 +16,9 @@ const authToken = process.env.TURSO_AUTH_TOKEN || undefined;
 
 export const client = createClient({ url, authToken, intMode: 'number' });
 
-export const isRemote = /^https?:\/\//.test(url);
+// Turso/libSQL hand out libsql:// URLs, which speak HTTP under the hood, so
+// only a file: URL means we are talking to a local database.
+export const isRemote = !url.startsWith('file:');
 
 const BATCH_SIZE = 100;
 

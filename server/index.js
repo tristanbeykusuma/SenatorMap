@@ -649,12 +649,18 @@ function streamParseTemplate(filePath, period) {
 }
 
 app.get('/api/admin/status', ah(async (req, res) => {
-  const counts = {
-    customers: (await db.prepare('SELECT COUNT(*) as cnt FROM customers').get()).cnt,
-    accounts: (await db.prepare('SELECT COUNT(*) as cnt FROM accounts').get()).cnt,
-    signals: (await db.prepare('SELECT COUNT(*) as cnt FROM denyut_signals').get()).cnt
-  };
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), data: counts });
+  // Each count is an independent round trip. Against a remote database that
+  // is one network hop per statement, so they run concurrently.
+  const [customers, accounts, signals] = await Promise.all([
+    db.prepare('SELECT COUNT(*) as cnt FROM customers').get(),
+    db.prepare('SELECT COUNT(*) as cnt FROM accounts').get(),
+    db.prepare('SELECT COUNT(*) as cnt FROM denyut_signals').get()
+  ]);
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    data: { customers: customers.cnt, accounts: accounts.cnt, signals: signals.cnt }
+  });
 }));
 
 app.post('/api/admin/upload/senator', upload.single('file'), ah(async (req, res) => {
@@ -965,45 +971,50 @@ app.delete('/api/echo/ecosystems/:id', ah(async (req, res) => {
 }));
 
 app.get('/api/denyut/stats', ah(async (req, res) => {
-  const totalCustomers = (await db.prepare('SELECT COUNT(*) as cnt FROM customers').get()).cnt;
-  const totalAccounts = (await db.prepare('SELECT COUNT(*) as cnt FROM accounts').get()).cnt;
-  const totalSignals = (await db.prepare('SELECT COUNT(*) as cnt FROM denyut_signals').get()).cnt;
-  const totalBalance = (await db.prepare('SELECT COALESCE(SUM(cbalrp), 0) as val FROM customer_balances').get()).val;
+  // All eight reads are independent, so they are issued concurrently. Done
+  // sequentially each one costs a full network round trip to the database.
+  const [
+    totalCustomers,
+    totalAccounts,
+    totalSignals,
+    totalBalance,
+    signalRows,
+    urgencyRows,
+    periodRows,
+    totalLending,
+    totalLendingAccounts
+  ] = await Promise.all([
+    db.prepare('SELECT COUNT(*) as cnt FROM customers').get(),
+    db.prepare('SELECT COUNT(*) as cnt FROM accounts').get(),
+    db.prepare('SELECT COUNT(*) as cnt FROM denyut_signals').get(),
+    db.prepare('SELECT COALESCE(SUM(cbalrp), 0) as val FROM customer_balances').get(),
+    db.prepare('SELECT status, COUNT(*) as cnt FROM denyut_signals GROUP BY status').all(),
+    db.prepare('SELECT urgency, COUNT(*) as cnt FROM denyut_signals GROUP BY urgency').all(),
+    db.prepare('SELECT DISTINCT template_period FROM accounts ORDER BY template_period').all(),
+    db.prepare('SELECT COALESCE(SUM(outstanding_balance), 0) as val FROM lending_balances').get(),
+    db.prepare('SELECT COUNT(*) as cnt FROM lending_balances').get()
+  ]);
 
-  const signalRows = await db.prepare(`
-    SELECT status, COUNT(*) as cnt FROM denyut_signals GROUP BY status
-  `).all();
   const signalCounts = {};
   for (const row of signalRows) {
     signalCounts[row.status] = row.cnt;
   }
 
-  const urgencyRows = await db.prepare(`
-    SELECT urgency, COUNT(*) as cnt FROM denyut_signals GROUP BY urgency
-  `).all();
   const urgencyCounts = {};
   for (const row of urgencyRows) {
     urgencyCounts[row.urgency] = row.cnt;
   }
 
-  const periodRows = await db.prepare(`
-    SELECT DISTINCT template_period FROM accounts ORDER BY template_period
-  `).all();
-  const periods = periodRows.map(r => r.template_period);
-
-  const totalLending = (await db.prepare('SELECT COALESCE(SUM(outstanding_balance), 0) as val FROM lending_balances').get()).val;
-  const totalLendingAccounts = (await db.prepare('SELECT COUNT(*) as cnt FROM lending_balances').get()).cnt;
-
   res.json({
-    totalCustomers,
-    totalAccounts,
-    totalBalance,
-    totalSignals,
+    totalCustomers: totalCustomers.cnt,
+    totalAccounts: totalAccounts.cnt,
+    totalBalance: totalBalance.val,
+    totalSignals: totalSignals.cnt,
     signalCounts,
     urgencyCounts,
-    periods,
-    totalLending,
-    totalLendingAccounts,
+    periods: periodRows.map(r => r.template_period),
+    totalLending: totalLending.val,
+    totalLendingAccounts: totalLendingAccounts.cnt
   });
 }));
 
@@ -1024,28 +1035,28 @@ app.get('/api/denyut/search', ah(async (req, res) => {
 
 app.get('/api/denyut/customer/:cifno', ah(async (req, res) => {
   const { cifno } = req.params;
+  // The customer row is fetched first only because it drives the 404.
   const customer = await db.prepare('SELECT c.*, (SELECT COUNT(*) FROM accounts WHERE cifno = c.cifno) as account_count, (SELECT COALESCE(cb.cbalrp, 0) FROM customer_balances cb WHERE cb.cifno = c.cifno) as latest_balance FROM customers c WHERE cifno = ?').get([cifno]);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-  const portfolio = await db.prepare('SELECT * FROM accounts WHERE cifno = ? ORDER BY template_period DESC').all([cifno]);
-
-  const yearData = await db.prepare(`
-    SELECT template_period,
-      COALESCE(SUM(CAST(cbalrp AS REAL)), 0) as total_balance,
-      COALESCE(SUM(CAST(avgbalrp AS REAL)), 0) as avg_balance,
-      COUNT(*) as account_count,
-      GROUP_CONCAT(DISTINCT actype) as product_types
-    FROM accounts
-    WHERE cifno = ?
-    GROUP BY template_period
-    ORDER BY template_period
-  `).all([cifno]);
-
-  const signals = await db.prepare('SELECT * FROM denyut_signals WHERE cifno = ? ORDER BY detected_at DESC').all([cifno]);
-
-  const lendingPortfolio = await db.prepare('SELECT * FROM lending_balances WHERE cifno = ? ORDER BY outstanding_balance DESC').all([cifno]);
-
-  const balanceBreakdown = await db.prepare('SELECT product_breakdown FROM customer_balances WHERE cifno = ?').get([cifno]);
+  // Everything else is independent of the row above, so it runs concurrently.
+  const [portfolio, yearData, signals, lendingPortfolio, balanceBreakdown] = await Promise.all([
+    db.prepare('SELECT * FROM accounts WHERE cifno = ? ORDER BY template_period DESC').all([cifno]),
+    db.prepare(`
+      SELECT template_period,
+        COALESCE(SUM(CAST(cbalrp AS REAL)), 0) as total_balance,
+        COALESCE(SUM(CAST(avgbalrp AS REAL)), 0) as avg_balance,
+        COUNT(*) as account_count,
+        GROUP_CONCAT(DISTINCT actype) as product_types
+      FROM accounts
+      WHERE cifno = ?
+      GROUP BY template_period
+      ORDER BY template_period
+    `).all([cifno]),
+    db.prepare('SELECT * FROM denyut_signals WHERE cifno = ? ORDER BY detected_at DESC').all([cifno]),
+    db.prepare('SELECT * FROM lending_balances WHERE cifno = ? ORDER BY outstanding_balance DESC').all([cifno]),
+    db.prepare('SELECT product_breakdown FROM customer_balances WHERE cifno = ?').get([cifno])
+  ]);
 
   let productBreakdown = {};
   if (balanceBreakdown && balanceBreakdown.product_breakdown) {
