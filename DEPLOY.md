@@ -80,6 +80,32 @@ fly deploy
 
 Do **not** run `fly launch` — it rewrites `fly.toml`.
 
+### What it costs
+
+Fly is pay-as-you-go and has no hard spending cap, so the bound comes from
+the configuration itself. Pricing below is current as of 1 October 2026.
+
+Our Machine is `shared-cpu-1x` with 1 GB RAM:
+
+| Component | Monthly |
+|---|---|
+| `shared-cpu-1x` base (256 MB) | $2.19 |
+| Extra RAM (768 MB @ $6.00/GB/mo) | $4.50 |
+| **Worst case, running 24/7** | **$6.69** |
+
+There is no volume, no dedicated IPv4, and no autoscaler, so the ceiling is
+fixed. Fly never creates Machines on your own — anything running was
+something we defined. `auto_stop_machines = "stop"` means an idle app costs
+almost nothing; roughly $0.20/month if used about two hours a day.
+
+Why 1 GB and not 256 MB: 256 MB would cut the ceiling to $2.19 but is tight
+enough to risk out-of-memory failures when parsing the radar workbook. The
+extra $4.50/month buys reliability.
+
+Two safeguards: watch "current month to date bill" in the dashboard, and
+`fly scale count 0` stops everything immediately. Fly states it will discuss
+a refund for compute created by mistake.
+
 ---
 
 ## Local development
