@@ -1,17 +1,21 @@
-# Fly.io configuration for Senator Map — REQUIRES A CREDIT CARD.
+# Senator Map — Fly.io deployment.
 #
-# Fly removed its no-card free tier: new organisations must add a payment
-# method before an app can be created, and the free trial is limited to
-# 2 VM hours or 7 days. If you have no card, use render.yaml instead — it
-# deploys the same stateless app on Render's free tier with no payment info.
+# Fly requires a payment method on file before an app can be created. The card
+# is only verified (a small pre-authorization is placed and immediately
+# cancelled); on a free-tier workload nothing is actually charged.
 #
-# If you do add a card, this config works as-is and needs no volume at all,
-# because the database is remote (Turso) and uploads are disposable.
+# No volume is needed: the database is remote (Turso) and uploaded workbooks
+# are disposable, so this config no longer carries any mounts.
 #
 #   fly apps create senator-map-denyut
+#   fly secrets set TURSO_DATABASE_URL=libsql://... TURSO_AUTH_TOKEN=...
 #   fly deploy
 #
 # Never run `fly launch` here: it rewrites this file.
+#
+# Note on cost: auto_stop_machines below stops the Machine when idle, which
+# keeps usage near zero but means the first request after a quiet period waits
+# for a cold boot. Set min_machines_running = 1 for an always-on app.
 
 app = "senator-map-denyut"
 primary_region = "sin"
