@@ -1020,6 +1020,68 @@ app.get('/api/default/radar', ah(async (req, res) => {
   try { res.json(JSON.parse(row.data)); } catch { res.status(500).json({ error: 'Invalid JSON' }); }
 }));
 
+// Exports the stored senator records — including status and
+// SOROT link edits made from the map — so the download
+// carries the updated data, not the file as originally
+// uploaded. Optional ?status=a,b and ?branch=x,y narrow
+// the rows to the sidebar selection.
+app.get('/api/export/:format', ah(async (req, res) => {
+  const format = req.params.format;
+  if (!['xlsx', 'csv', 'json'].includes(format)) {
+    return res.status(400).json({ error: 'Format must be xlsx, csv, or json' });
+  }
+
+  const { data } = await loadSenatorRows();
+  const statuses = (req.query.status || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const branches = (req.query.branch || '').split(',').map((s) => s.trim()).filter(Boolean);
+
+  let rows = data;
+  if (statuses.length > 0) rows = rows.filter((r) => statuses.includes(r.status));
+  if (branches.length > 0) rows = rows.filter((r) => branches.includes(r.branchName));
+
+  const records = rows.map((r) => ({
+    'Kode Cabang': r.branchCode || '',
+    'Cabang': r.branchName || '',
+    'Nama Lokasi': r.name || '',
+    'Alamat': r.address || '',
+    'Latitude': r.lat ?? '',
+    'Longitude': r.lng ?? '',
+    'Status': r.status || '',
+    'MID/NMID': r.midNmid || '',
+    'SOROT Content Link': r.sorotLink || '',
+  }));
+
+  if (format === 'json') {
+    return res.json(records);
+  }
+
+  if (format === 'csv') {
+    const headers = Object.keys(records[0] || {
+      'Kode Cabang': '', 'Cabang': '', 'Nama Lokasi': '', 'Alamat': '',
+      'Latitude': '', 'Longitude': '', 'Status': '', 'MID/NMID': '', 'SOROT Content Link': '',
+    });
+    const escape = (v) => {
+      const text = String(v ?? '');
+      return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const lines = [headers.map(escape).join(',')];
+    for (const rec of records) {
+      lines.push(headers.map((h) => escape(rec[h])).join(','));
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="senator_export.csv"');
+    return res.send(lines.join('\r\n'));
+  }
+
+  const worksheet = XLSX.utils.json_to_sheet(records);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Senator');
+  const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="senator_export.xlsx"');
+  res.send(buffer);
+}));
+
 app.get('/api/echo/ecosystems', ah(async (req, res) => {
   const ecosystems = await db.prepare('SELECT * FROM echo_ecosystems ORDER BY created_at DESC').all();
   const result = [];
