@@ -861,3 +861,43 @@
   color: #ef4444;
   font-weight: 700;
 }
+
+@media (max-width: 768px) {
+  .radar-page {
+    height: auto;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .radar-layout {
+    flex-direction: column;
+    height: auto;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .radar-sidebar {
+    width: 100%;
+    min-width: 0;
+    max-height: 42vh;
+    flex-shrink: 0;
+  }
+
+  .radar-map-container {
+    min-height: 0;
+  }
+
+  .branch-detail-panel {
+    width: 100%;
+  }
+
+  .radar-filters .search-input {
+    font-size: 16px;
+  }
+
+  .radar-stat-value {
+    font-size: 20px;
+  }
+}

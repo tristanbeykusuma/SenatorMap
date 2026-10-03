@@ -641,3 +641,48 @@
   font-weight: 600;
   color: #cdd6f4;
 }
+
+@media (max-width: 768px) {
+  .denyut-layout {
+    flex-direction: column;
+  }
+
+  .denyut-sidebar {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    max-height: 42vh;
+    flex-shrink: 0;
+  }
+
+  .radar-map-container {
+    min-height: 0;
+  }
+
+  .denyut-search .search-input {
+    font-size: 16px;
+  }
+
+  .denyut-detail-content {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .detail-left,
+  .detail-right {
+    width: 100%;
+    min-width: 0;
+    flex: none;
+    overflow-y: visible;
+  }
+
+  .detail-right {
+    border-left: none;
+    border-top: 1px solid rgba(255,255,255,0.1);
+  }
+
+  .denyut-quick-stats {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+}
