@@ -1,0 +1,1 @@
+{"query":"query { __type(name: \"Principal\") { fields { name } } }"}

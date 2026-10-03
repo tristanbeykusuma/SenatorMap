@@ -119,10 +119,10 @@ function parseSenatorMapData(filePath, mapping) {
 
       const colBranchCode = pick(mapping?.branchCode, ['kode cabang', 'kode_cabang', 'branchcode', 'branch_code']);
       const colBranchName = pick(mapping?.branchName, ['cabang', 'branchname', 'branch_name', 'nama cabang']);
-      const colName = pick(mapping?.name, ['nama lokasi', 'nama_lokasi', 'nearby_name', 'name', 'place name']);
-      const colAddress = pick(mapping?.address, ['alamat', 'address']);
-      const colLat = pick(mapping?.lat, ['nearby_lat', 'lat', 'latitude']);
-      const colLng = pick(mapping?.lng, ['nearby_lng', 'lng', 'longitude', 'long']);
+      const colName = pick(mapping?.name, ['nama lokasi', 'nama_lokasi', 'nearby_name', 'name', 'place name', 'merchant_name', 'merchant name']);
+      const colAddress = pick(mapping?.address, ['alamat', 'address', 'merchant_address', 'merchant address']);
+      const colLat = pick(mapping?.lat, ['nearby_lat', 'lat', 'latitude', 'src_lat', 'src lat']);
+      const colLng = pick(mapping?.lng, ['nearby_lng', 'lng', 'longitude', 'long', 'src_lng', 'src lng']);
       const colStatus = pick(mapping?.status, ['ket', 'status', 'ket status']);
       const colMidNmid = pick(mapping?.midNmid, ['mid/nmid', 'mid_nmid', 'midnmid']);
       const colPlaceId = pick(mapping?.placeId, ['nearby_place_id', 'placeid', 'place_id']);
@@ -1039,16 +1039,14 @@ app.get('/api/export/:format', ah(async (req, res) => {
   if (statuses.length > 0) rows = rows.filter((r) => statuses.includes(r.status));
   if (branches.length > 0) rows = rows.filter((r) => branches.includes(r.branchName));
 
-  const records = rows.map((r) => ({
-    'Kode Cabang': r.branchCode || '',
-    'Cabang': r.branchName || '',
-    'Nama Lokasi': r.name || '',
-    'Alamat': r.address || '',
-    'Latitude': r.lat ?? '',
-    'Longitude': r.lng ?? '',
-    'Status': r.status || '',
-    'MID/NMID': r.midNmid || '',
-    'SOROT Content Link': r.sorotLink || '',
+  const records = rows.map((r, i) => ({
+    number: r.id ?? i + 1,
+    cabang: r.branchName || '',
+    merchant_name: r.name || '',
+    merchant_address: r.address || '',
+    src_lat: r.lat ?? '',
+    src_lng: r.lng ?? '',
+    Status: r.status || '',
   }));
 
   if (format === 'json') {
@@ -1056,15 +1054,12 @@ app.get('/api/export/:format', ah(async (req, res) => {
   }
 
   if (format === 'csv') {
-    const headers = Object.keys(records[0] || {
-      'Kode Cabang': '', 'Cabang': '', 'Nama Lokasi': '', 'Alamat': '',
-      'Latitude': '', 'Longitude': '', 'Status': '', 'MID/NMID': '', 'SOROT Content Link': '',
-    });
+    const headers = ['number', 'cabang', 'merchant_name', 'merchant_address', 'src_lat', 'src_lng', 'Status'];
     const escape = (v) => {
       const text = String(v ?? '');
       return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
     };
-    const lines = [headers.map(escape).join(',')];
+    const lines = [headers.join(',')];
     for (const rec of records) {
       lines.push(headers.map((h) => escape(rec[h])).join(','));
     }
