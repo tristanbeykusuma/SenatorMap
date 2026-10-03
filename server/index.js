@@ -708,6 +708,53 @@ app.post('/api/admin/upload/senator', upload.single('file'), ah(async (req, res)
   }
 }));
 
+// Branch coordinates for the 41 branches in the radar workbook,
+// keyed by 5-digit branch code. The workbook itself carries no
+// location columns, so the map joins on this table.
+const BRANCH_COORDS = {
+  '13800': [-7.5671513, 110.8101858],
+  '13801': [-7.5651108, 110.8039404],
+  '13802': [-7.7129117, 110.5937162],
+  '13803': [-7.5715089, 110.8276454],
+  '13804': [-7.5753702, 110.8267448],
+  '13805': [-7.5661550, 110.8675268],
+  '13806': [-7.5382162, 110.6089110],
+  '13807': [-7.5975296, 110.8147909],
+  '13808': [-7.5518125, 110.7921875],
+  '13809': [-7.6163430, 110.7005432],
+  '13810': [-7.5945158, 110.9447847],
+  '13811': [-7.4305925, 111.0065626],
+  '13812': [-7.5554915, 110.7479779],
+  '13813': [-7.6851194, 110.8440683],
+  '13814': [-7.5637035, 110.8237826],
+  '13815': [-7.5742119, 110.8208158],
+  '13821': [-7.8129046, 110.9242317],
+  '13822': [-7.5634595, 110.8353824],
+  '13823': [-7.5502544, 110.8214161],
+  '13825': [-7.3980155, 110.8265687],
+  '13826': [-7.5640191, 110.8555954],
+  '13827': [-7.5814986, 110.8189667],
+  '13874': [-7.3658319, 110.6387696],
+  '13875': [-7.6963425, 110.7008651],
+  '13876': [-7.9795920, 110.9340659],
+  '13877': [-7.7552848, 110.4983090],
+  '13878': [-7.3846379, 110.9110453],
+  '13879': [-7.6153543, 111.0789569],
+  '13881': [-7.6372194, 110.6012384],
+  '13884': [-7.4392189, 110.6769572],
+  '13885': [-7.7598523, 110.6959797],
+  '13886': [-7.8268536, 111.1262068],
+  '13887': [-7.5239067, 110.9983126],
+  '13888': [-7.7357027, 110.7952652],
+  '13889': [-7.5822859, 110.7838014],
+  '13890': [-7.4067732, 111.1098136],
+  '13891': [-7.8468328, 111.2628140],
+  '13893': [-8.0562438, 110.8082813],
+  '13894': [-7.8146299, 110.9985829],
+  '13897': [-7.4699811, 110.9309179],
+  '13898': [-7.6654651, 110.7506948],
+};
+
 function parseRadarWorkbook(filePath) {
   return new Promise((resolve, reject) => {
     try {
@@ -788,13 +835,14 @@ function parseRadarWorkbook(filePath) {
         const perf = b.perf;
         const laggingClass = classify(perf);
         const leadingClass = classify(perf);
+        const coords = BRANCH_COORDS[b.code] || null;
 
         branches.push({
           id: ++idx,
           branchCode: b.code,
           branchName: b.name,
-          lat: 0,
-          lng: 0,
+          lat: coords ? coords[0] : null,
+          lng: coords ? coords[1] : null,
           performance: b.growthRate >= 0 ? 'growing' : 'stagnant',
           performanceValue: perf,
           totalDpk: b.totalDpk,
@@ -822,9 +870,9 @@ function parseRadarWorkbook(filePath) {
 app.post('/api/admin/upload/radar', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
-    const stats = await streamParseTemplate(req.file.path, 'radar');
-    await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('radar', JSON.stringify([]), JSON.stringify({ processed: stats }));
-    res.json({ success: true, data: [], stats: { processed: stats } });
+    const branches = await parseRadarWorkbook(req.file.path);
+    await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('radar', JSON.stringify(branches), JSON.stringify({ processed: branches.length }));
+    res.json({ success: true, data: branches, stats: { processed: branches.length } });
   } catch (e) {
     res.status(500).json({ error: e.message });
   } finally {
@@ -836,6 +884,7 @@ app.post('/api/upload/radar', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const branches = await parseRadarWorkbook(req.file.path);
+    await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('radar', JSON.stringify(branches), JSON.stringify({ processed: branches.length }));
     res.json({ success: true, data: branches, stats: { processed: branches.length } });
   } catch (e) {
     res.status(500).json({ error: e.message });

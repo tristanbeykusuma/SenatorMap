@@ -109,7 +109,7 @@ const LeadGen: React.FC<LeadGenProps> = ({ branches, onUpload }) => {
     important: localBranches.filter(b => b.performance === 'important').length
   };
 
-  const mappedBranches = localBranches.filter(b => b.lat !== 0 && b.lng !== 0);
+  const mappedBranches = localBranches.filter(b => b.lat != null && b.lat !== 0 && b.lng != null && b.lng !== 0);
   const center: [number, number] = mappedBranches.length > 0
     ? [mappedBranches.reduce((s, b) => s + b.lat, 0) / mappedBranches.length, mappedBranches.reduce((s, b) => s + b.lng, 0) / mappedBranches.length]
     : [-7.56695, 110.81022];
@@ -235,7 +235,7 @@ const LeadGen: React.FC<LeadGenProps> = ({ branches, onUpload }) => {
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               />
-              {filtered.filter(b => b.lat !== 0 && b.lng !== 0).map(b => (
+              {filtered.filter(b => b.lat != null && b.lat !== 0 && b.lng != null && b.lng !== 0).map(b => (
                 <Marker
                   key={b.id}
                   position={[b.lat, b.lng]}

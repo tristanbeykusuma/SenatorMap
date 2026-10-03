@@ -248,7 +248,8 @@ const MapFocusHandler: React.FC<{ selectedBranch: BranchPerformance | null; mapC
   const map = useMap();
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (selectedBranch && selectedBranch.lat !== 0 && selectedBranch.lng !== 0) {
+      if (selectedBranch && selectedBranch.lat != null && selectedBranch.lat !== 0 &&
+          selectedBranch.lng != null && selectedBranch.lng !== 0) {
         map.flyTo([selectedBranch.lat, selectedBranch.lng], 15, { duration: 0.8 });
       }
     }, 100);
@@ -432,7 +433,7 @@ const RadarPage: React.FC<RadarPageProps> = ({ branches, onUpload }) => {
   const mappedBranches = filtered.map(b => {
     const coords = BRANCH_COORDS[b.branchCode];
     return { ...b, lat: coords ? coords[0] : b.lat, lng: coords ? coords[1] : b.lng };
-  }).filter(b => b.lat !== 0 && b.lng !== 0);
+  }).filter(b => b.lat != null && b.lat !== 0 && b.lng != null && b.lng !== 0);
   const center: [number, number] = mappedBranches.length > 0
     ? [mappedBranches.reduce((s, b) => s + b.lat, 0) / mappedBranches.length, mappedBranches.reduce((s, b) => s + b.lng, 0) / mappedBranches.length]
     : [-7.56695, 110.81022];
