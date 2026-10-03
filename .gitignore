@@ -32,6 +32,8 @@ server/*.cjs
 server/*.mjs
 server/diag.txt
 server/test-*.csv
+server/*.json.bak
+server/gql-*.json
 
 # Large test/template data files (not needed to run the app)
 Template_*.xlsx
