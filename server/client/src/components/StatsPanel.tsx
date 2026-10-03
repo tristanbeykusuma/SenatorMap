@@ -1,4 +1,5 @@
 import type { Stats } from '../types';
+import { getStatusColor } from '../utils/statusConfig';
 
 interface StatsPanelProps {
   stats: Stats | null;
@@ -71,15 +72,5 @@ const StatsPanel: React.FC<StatsPanelProps> = ({ stats, filteredCount }) => {
     </div>
   );
 };
-
-function getStatusColor(status: string): string {
-  const colors: Record<string, string> = {
-    'Belum FU': '#ef4444',
-    'Belum Merchant': '#f59e0b',
-    'FU': '#22c55e',
-    'Done': '#3b82f6'
-  };
-  return colors[status] || '#6b7280';
-}
 
 export default StatsPanel;

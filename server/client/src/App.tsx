@@ -14,18 +14,14 @@ import DenyutPage from './pages/DenyutPage';
 import AdminPage from './pages/AdminPage';
 import { sessionManager } from './utils/sessionManager';
 import type { LocationData, Stats, BranchPerformance } from './types';
+import {
+  STATUS_OPTIONS,
+  STATUS_COLORS,
+  getStatusGlyph,
+} from './utils/statusConfig';
 
 const DEFAULT_CENTER: [number, number] = [-7.56695, 110.81022];
 const DEFAULT_ZOOM = 14;
-
-const STATUS_COLORS: Record<string, string> = {
-  'Belum FU': '#ef4444',
-  'Belum Merchant': '#f59e0b',
-  'FU': '#22c55e',
-  'Done': '#3b82f6'
-};
-
-const STATUS_OPTIONS = ['Belum FU', 'Belum Merchant', 'FU', 'Done'];
 
 function App() {
   const [locations, setLocations] = useState<LocationData[]>([]);
@@ -212,6 +208,10 @@ function App() {
         const branchMatch = selectedBranches.length === 0 || selectedBranches.includes(loc.branchName);
         return statusMatch && branchMatch;
       });
+
+  // Any status a workbook carries shows up in the marker popup
+  // even when it is not one of the nine standard labels.
+  const statusOptions = [...new Set([...STATUS_OPTIONS, ...locations.map((l) => l.status)])];
 
   const handleStatusToggle = (status: string) => {
     setSelectedStatuses(prev => prev.includes(status)
@@ -513,7 +513,7 @@ function App() {
                           iconUrl: `data:image/svg+xml,${encodeURIComponent(`
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="28" height="28">
                               <circle cx="12" cy="12" r="10" fill="${STATUS_COLORS[location.status] || '#6b7280'}" stroke="white" stroke-width="2"/>
-                              <text x="12" y="16" text-anchor="middle" fill="white" font-size="10" font-weight="bold">${location.status === 'Belum FU' ? '●' : location.status === 'Belum Merchant' ? '◆' : '✓'}</text>
+                              <text x="12" y="16" text-anchor="middle" fill="white" font-size="10" font-weight="bold">${getStatusGlyph(location.status)}</text>
                             </svg>
                           `)}`,
                           iconSize: [28, 28],
@@ -532,7 +532,7 @@ function App() {
                               value={location.status}
                               onChange={(e) => handleStatusChange(location.id, e.target.value)}
                             >
-                              {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+                              {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
                             </select>
                           </p>
                           <p><strong>Address:</strong> {location.address}</p>

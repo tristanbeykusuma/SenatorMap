@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Stats } from '../types';
+import { STATUS_COLORS } from '../utils/statusConfig';
 
 interface FilterPanelProps {
   stats: Stats | null;
@@ -12,13 +13,6 @@ interface FilterPanelProps {
   onSelectAllBranches: () => void;
   onClearAllBranches: () => void;
 }
-
-const STATUS_COLORS: Record<string, string> = {
-  'Belum FU': '#ef4444',
-  'Belum Merchant': '#f59e0b',
-  'FU': '#22c55e',
-  'Done': '#3b82f6'
-};
 
 const FilterPanel: React.FC<FilterPanelProps> = ({ 
   stats, 
