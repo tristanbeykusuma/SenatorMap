@@ -767,9 +767,9 @@ app.get('/api/admin/status', ah(async (req, res) => {
 app.post('/api/admin/upload/senator', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
-    const stats = await streamParseTemplate(req.file.path, 'senator');
-    await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('senator', JSON.stringify([]), JSON.stringify({ processed: stats }));
-    res.json({ success: true, data: [], stats: { processed: stats } });
+    const result = await parseSenatorMapData(req.file.path);
+    await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('senator', JSON.stringify(result.data), JSON.stringify(result.stats));
+    res.json({ success: true, data: result.data, stats: result.stats });
   } catch (e) {
     res.status(500).json({ error: e.message });
   } finally {
@@ -1250,6 +1250,7 @@ app.post('/api/upload/confirm', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const result = await parseSenatorMapData(req.file.path);
+    await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('senator', JSON.stringify(result.data), JSON.stringify(result.stats));
     res.json({ success: true, data: result.data, stats: result.stats });
   } catch (e) {
     res.status(500).json({ error: e.message });
