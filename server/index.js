@@ -45,7 +45,10 @@ function colRefToNum(ref) {
   return num - 1;
 }
 
-function parseSenatorMapData(filePath) {
+// The user picks columns in the upload dialog, so their choice always
+// wins over the built-in name matching. A mapped column is resolved
+// against the header row case- and punctuation-insensitively.
+function parseSenatorMapData(filePath, mapping) {
   return new Promise((resolve, reject) => {
     try {
       const workbook = XLSX.readFile(filePath);
@@ -83,6 +86,23 @@ function parseSenatorMapData(filePath) {
         return -1;
       };
 
+      // Resolve a user-chosen column name to its index. Falls back to a
+      // contains-match so "Latitude (decimal)" still finds "latitude".
+      const resolveMapped = (chosen) => {
+        if (chosen === undefined || chosen === null || chosen === '') return -1;
+        const needle = String(chosen).toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (headerMap[needle] !== undefined) return headerMap[needle];
+        for (const key of Object.keys(headerMap)) {
+          if (key.includes(needle) || needle.includes(key)) return headerMap[key];
+        }
+        return -1;
+      };
+
+      const pick = (chosen, defaults) => {
+        const idx = resolveMapped(chosen);
+        return idx >= 0 ? idx : getCol(defaults);
+      };
+
       // Indonesian decimal/comma formatting, stray whitespace and thousands
       // separators all appear in hand-maintained branch spreadsheets.
       const parseCoord = (value) => {
@@ -97,14 +117,15 @@ function parseSenatorMapData(filePath) {
         return Number.isFinite(num) ? num : null;
       };
 
-      const colBranchCode = getCol(['kode cabang', 'kode_cabang', 'branchcode', 'branch_code']);
-      const colBranchName = getCol(['cabang', 'branchname', 'branch_name', 'nama cabang']);
-      const colName = getCol(['nama lokasi', 'nama_lokasi', 'nearby_name', 'name', 'place name']);
-      const colAddress = getCol(['alamat', 'address']);
-      const colLat = getCol(['nearby_lat', 'lat', 'latitude']);
-      const colLng = getCol(['nearby_lng', 'lng', 'longitude', 'long']);
-      const colStatus = getCol(['ket', 'status', 'ket status']);
-      const colMidNmid = getCol(['mid/nmid', 'mid_nmid', 'midnmid']);
+      const colBranchCode = pick(mapping?.branchCode, ['kode cabang', 'kode_cabang', 'branchcode', 'branch_code']);
+      const colBranchName = pick(mapping?.branchName, ['cabang', 'branchname', 'branch_name', 'nama cabang']);
+      const colName = pick(mapping?.name, ['nama lokasi', 'nama_lokasi', 'nearby_name', 'name', 'place name']);
+      const colAddress = pick(mapping?.address, ['alamat', 'address']);
+      const colLat = pick(mapping?.lat, ['nearby_lat', 'lat', 'latitude']);
+      const colLng = pick(mapping?.lng, ['nearby_lng', 'lng', 'longitude', 'long']);
+      const colStatus = pick(mapping?.status, ['ket', 'status', 'ket status']);
+      const colMidNmid = pick(mapping?.midNmid, ['mid/nmid', 'mid_nmid', 'midnmid']);
+      const colPlaceId = pick(mapping?.placeId, ['nearby_place_id', 'placeid', 'place_id']);
 
       const data = [];
       const byStatus = {};
@@ -133,7 +154,9 @@ function parseSenatorMapData(filePath) {
 
         const location = {
           id: i,
-          placeId: `place_${i}`,
+          placeId: (colPlaceId >= 0 && row[colPlaceId] !== undefined && row[colPlaceId] !== null && row[colPlaceId] !== '')
+            ? String(row[colPlaceId])
+            : `place_${i}`,
           branchCode,
           branchName,
           address,
@@ -166,8 +189,11 @@ function parseSenatorMapData(filePath) {
       // column names match — their first rows are area and section labels,
       // and branch rows simply start with a 5-digit code and a name. When
       // nothing matched above, scan for those rows so the same workbook
-      // still plots instead of coming back empty.
-      if (data.length === 0) {
+      // still plots instead of coming back empty. Skipped when the user
+      // mapped columns explicitly: their choice is the intent, so an empty
+      // result means the mapping genuinely did not fit this file.
+      const hasUserMapping = mapping && Object.values(mapping).some((v) => v);
+      if (data.length === 0 && !hasUserMapping) {
         const seen = new Set();
         for (let i = 1; i < jsonData.length; i++) {
           const row = jsonData[i];
@@ -766,8 +792,12 @@ app.get('/api/admin/status', ah(async (req, res) => {
 
 app.post('/api/admin/upload/senator', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  let mapping = null;
+  if (req.body && req.body.mapping) {
+    try { mapping = JSON.parse(req.body.mapping); } catch { mapping = null; }
+  }
   try {
-    const result = await parseSenatorMapData(req.file.path);
+    const result = await parseSenatorMapData(req.file.path, mapping);
     await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('senator', JSON.stringify(result.data), JSON.stringify(result.stats));
     res.json({ success: true, data: result.data, stats: result.stats });
   } catch (e) {
@@ -1248,8 +1278,12 @@ app.post('/api/upload/preview', upload.single('file'), ah(async (req, res) => {
 
 app.post('/api/upload/confirm', upload.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  let mapping = null;
+  if (req.body && req.body.mapping) {
+    try { mapping = JSON.parse(req.body.mapping); } catch { mapping = null; }
+  }
   try {
-    const result = await parseSenatorMapData(req.file.path);
+    const result = await parseSenatorMapData(req.file.path, mapping);
     await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('senator', JSON.stringify(result.data), JSON.stringify(result.stats));
     res.json({ success: true, data: result.data, stats: result.stats });
   } catch (e) {

@@ -83,7 +83,10 @@ const ColumnMappingDialog: React.FC<ColumnMappingDialogProps> = ({
     onConfirm(mapping);
   };
 
-  const canConfirm = mapping.lat && mapping.lng;
+  // Latitude and longitude are optional: a file without coordinate
+  // columns still imports, and rows for known branches are
+  // positioned from the branch coordinate table.
+  const canConfirm = true;
 
   return (
     <div className="dialog-overlay">
@@ -96,7 +99,8 @@ const ColumnMappingDialog: React.FC<ColumnMappingDialogProps> = ({
         <div className="dialog-body">
           <p className="dialog-hint">
             Match your Excel/CSV columns to the app fields. {previewData.totalRows} rows total.
-            Unmapped fields will be left blank.
+            Unmapped fields will be left blank. Latitude and longitude can be any
+            column — or left unmapped when the file has no coordinates.
           </p>
 
           <div className="mapping-table">
@@ -142,7 +146,6 @@ const ColumnMappingDialog: React.FC<ColumnMappingDialogProps> = ({
             className="btn btn-primary"
             onClick={handleConfirm}
             disabled={!canConfirm || isProcessing}
-            title="Latitude and Longitude are required"
           >
             {isProcessing ? 'Importing...' : 'Import'}
           </button>
