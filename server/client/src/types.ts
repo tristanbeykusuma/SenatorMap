@@ -4,12 +4,15 @@ export interface LocationData {
   branchCode: string;
   branchName: string;
   address: string;
-  lat: number;
-  lng: number;
+  lat: number | null;
+  lng: number | null;
   name: string;
   status: string;
-  srcLat: number;
-  srcLng: number;
+  // Source coordinates from the uploaded sheet. Older uploads stored these as
+  // 0 rather than null, so consumers must treat 0 as "missing" too.
+  srcLat: number | null;
+  srcLng: number | null;
+  hasCoords?: boolean;
   midNmid: number | string;
   sorotLink?: string;
 }

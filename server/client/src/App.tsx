@@ -45,6 +45,33 @@ function App() {
   const [addingActive, setAddingActive] = useState(false);
   const mapRef = useRef<any>(null);
 
+// A coordinate is only usable if it is a real, non-zero number. Uploads
+  // missing a lat/lng column used to arrive as 0, and 0/0 is a valid position in
+  // the Gulf of Guinea, so a plain truthiness check hides the bug instead of
+  // showing it.
+  const usableCoord = (...candidates: Array<number | null | undefined>) => {
+    for (const value of candidates) {
+      if (typeof value === 'number' && Number.isFinite(value) && value !== 0) return value;
+    }
+    return null;
+  };
+
+  // Averaging in records that have no coordinates drags the map toward 0,0.
+  const centerOf = (rows: LocationData[]): [number, number] | null => {
+    let sumLat = 0;
+    let sumLng = 0;
+    let count = 0;
+    for (const row of rows) {
+      const lat = usableCoord(row.lat);
+      const lng = usableCoord(row.lng);
+      if (lat === null || lng === null) continue;
+      sumLat += lat;
+      sumLng += lng;
+      count++;
+    }
+    return count > 0 ? [sumLat / count, sumLng / count] : null;
+  };
+
   const handleFileUpload = (data: LocationData[], statsData: Stats) => {
     setLocations(data);
     setStats(statsData);
@@ -53,10 +80,9 @@ function App() {
     const branches = [...new Set(data.map(d => d.branchName))];
     setSelectedBranches(branches);
 
-    if (data.length > 0) {
-      const avgLat = data.reduce((sum, d) => sum + d.lat, 0) / data.length;
-      const avgLng = data.reduce((sum, d) => sum + d.lng, 0) / data.length;
-      setMapCenter([avgLat, avgLng]);
+    const center = centerOf(data);
+    if (center) {
+      setMapCenter(center);
     }
   };
 
@@ -106,11 +132,10 @@ function App() {
             setStats(senatorData.stats || null);
             setSelectedStatuses([...new Set(senatorData.data.map((d: LocationData) => d.status))]);
             setSelectedBranches([...new Set(senatorData.data.map((d: LocationData) => d.branchName))]);
-            if (senatorData.data.length > 0) {
-              const avgLat = senatorData.data.reduce((sum: number, d: LocationData) => sum + d.lat, 0) / senatorData.data.length;
-              const avgLng = senatorData.data.reduce((sum: number, d: LocationData) => sum + d.lng, 0) / senatorData.data.length;
-              setMapCenter([avgLat, avgLng]);
-            }
+            const center = centerOf(senatorData.data);
+              if (center) {
+                setMapCenter(center);
+              }
           }
 
           const radarRes = await fetch('/api/default/radar');
@@ -148,19 +173,21 @@ function App() {
   const handleSearch = (results: LocationData[]) => {
     setSearchResults(results);
     setIsSearchActive(true);
-    if (results.length > 0) {
-      const avgLat = results.reduce((sum, r) => sum + r.lat, 0) / results.length;
-      const avgLng = results.reduce((sum, r) => sum + r.lng, 0) / results.length;
-      setMapCenter([avgLat, avgLng]);
+    const center = centerOf(results);
+    if (center) {
+      setMapCenter(center);
       setMapZoom(results.length === 1 ? 17 : 13);
     }
   };
 
   const handleResultFocus = (location: LocationData) => {
-    setMapCenter([location.lat, location.lng]);
+    const lat = usableCoord(location.lat);
+    const lng = usableCoord(location.lng);
+    if (lat === null || lng === null) return;
+    setMapCenter([lat, lng]);
     setMapZoom(17);
     if (mapRef.current) {
-      mapRef.current.flyTo([location.lat, location.lng], 17, { duration: 0.8 });
+      mapRef.current.flyTo([lat, lng], 17, { duration: 0.8 });
     }
   };
 
@@ -287,16 +314,22 @@ function App() {
     }
   };
 
+  // Source coordinates predate the nearest-merchant lookup in some uploads and
+  // can be stored as 0 rather than null. `??` only falls back on null/undefined,
+  // so `0 ?? lat` stayed 0 and every branch centre collapsed onto null island.
   const uniqueBranchCenters = (() => {
     const branchGroups: Record<string, { lat: number; lng: number; count: number; name: string }> = {};
     filteredLocations.forEach(loc => {
       const code = loc.branchCode || loc.branchName;
       if (!code) return;
+      const lat = usableCoord(loc.srcLat, loc.lat);
+      const lng = usableCoord(loc.srcLng, loc.lng);
+      if (lat === null || lng === null) return;
       if (!branchGroups[code]) {
         branchGroups[code] = { lat: 0, lng: 0, count: 0, name: loc.branchName || code };
       }
-      branchGroups[code].lat += loc.srcLat ?? loc.lat;
-      branchGroups[code].lng += loc.srcLng ?? loc.lng;
+      branchGroups[code].lat += lat;
+      branchGroups[code].lng += lng;
       branchGroups[code].count++;
     });
     return Object.entries(branchGroups).map(([code, g]) => ({
@@ -462,10 +495,16 @@ function App() {
                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                    />
 
-{filteredLocations.map((location) => (
-<Marker
-                       key={location.id}
-                       position={[location.lat, location.lng]}
+{filteredLocations.map((location) => {
+                      // Skip records without usable coordinates rather than
+                      // dropping a pin at 0,0.
+                      const lat = usableCoord(location.lat);
+                      const lng = usableCoord(location.lng);
+                      if (lat === null || lng === null) return null;
+                      return (
+                      <Marker
+                        key={location.id}
+                        position={[lat, lng]}
                        eventHandlers={{
                          click: () => handleMapMarkerClick(location)
                        }}
@@ -497,11 +536,11 @@ function App() {
                             </select>
                           </p>
                           <p><strong>Address:</strong> {location.address}</p>
-                          <p><strong>Coordinates:</strong> {location.lat.toFixed(6)}, {location.lng.toFixed(6)}</p>
+                          <p><strong>Coordinates:</strong> {lat.toFixed(6)}, {lng.toFixed(6)}</p>
                           <p><strong>MID/NMID:</strong> {location.midNmid}</p>
                           <div className="popup-links">
                             <a
-                              href={`https://www.google.com/maps/search/?api=1&query=${location.lat},${location.lng}`}
+                              href={`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="popup-link"
@@ -509,7 +548,7 @@ function App() {
                               🗺️ Google Maps
                             </a>
                             <a
-                              href={`https://www.openstreetmap.org/?mlat=${location.lat}&mlon=${location.lng}&zoom=17`}
+                              href={`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}&zoom=17`}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="popup-link"
@@ -545,7 +584,8 @@ function App() {
                         </div>
                       </Popup>
                     </Marker>
-                  ))}
+                      );
+                    })}
 
                   {showSourceMarkers && uniqueBranchCenters.map(location => (
                     <Marker
@@ -610,10 +650,9 @@ function App() {
               setStats(statsData);
               setSelectedStatuses([...new Set(data.map(d => d.status))]);
               setSelectedBranches([...new Set(data.map(d => d.branchName))]);
-              if (data.length > 0) {
-                const avgLat = data.reduce((sum, d) => sum + d.lat, 0) / data.length;
-                const avgLng = data.reduce((sum, d) => sum + d.lng, 0) / data.length;
-                setMapCenter([avgLat, avgLng]);
+              const center = centerOf(data);
+              if (center) {
+                setMapCenter(center);
               }
               setCurrentPage('map');
             }}

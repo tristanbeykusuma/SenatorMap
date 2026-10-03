@@ -44,12 +44,21 @@ const GoogleRoutePlanner = ({
     if (!isNaN(lat) && !isNaN(lng)) onSetStart(lat, lng);
   };
 
+  // Routing through a record that has no position would anchor the whole
+  // sequence to 0,0, so unpositioned stops are dropped before any distance
+  // math rather than being treated as valid coordinates.
+  const positionedStops = selectedStops.filter(
+    (s): s is LocationData & { lat: number; lng: number } =>
+      typeof s.lat === 'number' && Number.isFinite(s.lat) && s.lat !== 0 &&
+      typeof s.lng === 'number' && Number.isFinite(s.lng) && s.lng !== 0
+  );
+
   const handleOptimize = () => {
-    if (selectedStops.length < 2) return;
-    const origin = start || { lat: selectedStops[0].lat, lng: selectedStops[0].lng };
+    if (positionedStops.length < 2) return;
+    const origin = start || { lat: positionedStops[0].lat, lng: positionedStops[0].lng };
     const route: LocationData[] = [];
     let current = origin;
-    const remaining = [...selectedStops];
+    const remaining = [...positionedStops];
     while (remaining.length > 0) {
       let bestIdx = 0;
       let bestDist = haversine(current, remaining[0]);
@@ -65,11 +74,11 @@ const GoogleRoutePlanner = ({
   };
 
   const handleOpenRoute = () => {
-    if (selectedStops.length === 0) return;
+    if (positionedStops.length === 0) return;
     const origin = start
       ? `${start.lat},${start.lng}`
-      : `${selectedStops[0].lat},${selectedStops[0].lng}`;
-    const waypoints = selectedStops.map(l => `${l.lat},${l.lng}`).join('|');
+      : `${positionedStops[0].lat},${positionedStops[0].lng}`;
+    const waypoints = positionedStops.map(l => `${l.lat},${l.lng}`).join('|');
     const url = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&waypoints=${encodeURIComponent(waypoints)}&travelmode=driving&dir_action=navigate`;
     window.open(url, '_blank', 'noopener,noreferrer');
   };

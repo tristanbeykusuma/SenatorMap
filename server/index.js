@@ -61,30 +61,55 @@ function parseSenatorMapData(filePath) {
       const headers = jsonData[0];
       const headerMap = {};
       headers.forEach((h, i) => {
-        const normalized = String(h).toLowerCase().trim();
-        headerMap[normalized] = i;
+        // Normalise away punctuation and spacing so "Nama Lokasi (Google Maps)",
+        // "nama_lokasi" and "Kode Cabang" all collapse to comparable keys.
+        const normalized = String(h).toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (normalized && headerMap[normalized] === undefined) headerMap[normalized] = i;
       });
 
+      // Match on the full normalised name first, then fall back to a prefix so a
+      // decorated header such as "nama lokasi google maps" still resolves.
       const getCol = (names) => {
         for (const name of names) {
-          const idx = headerMap[name.toLowerCase()];
-          if (idx !== undefined) return idx;
+          const needle = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (headerMap[needle] !== undefined) return headerMap[needle];
+        }
+        for (const name of names) {
+          const needle = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+          for (const key of Object.keys(headerMap)) {
+            if (key.startsWith(needle) || needle.startsWith(key)) return headerMap[key];
+          }
         }
         return -1;
+      };
+
+      // Indonesian decimal/comma formatting, stray whitespace and thousands
+      // separators all appear in hand-maintained branch spreadsheets.
+      const parseCoord = (value) => {
+        if (value === null || value === undefined || value === '') return null;
+        if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+        let text = String(value).trim().replace(/\s/g, '');
+        if (!text) return null;
+        // "1.234,56" (Indonesian) vs "1,234.56" (English)
+        if (/,\d{1,2}$/.test(text) && text.includes('.')) text = text.replace(/\./g, '').replace(',', '.');
+        else text = text.replace(/,/g, '');
+        const num = Number(text);
+        return Number.isFinite(num) ? num : null;
       };
 
       const colBranchCode = getCol(['kode cabang', 'kode_cabang', 'branchcode', 'branch_code']);
       const colBranchName = getCol(['cabang', 'branchname', 'branch_name', 'nama cabang']);
       const colName = getCol(['nama lokasi', 'nama_lokasi', 'nearby_name', 'name', 'place name']);
       const colAddress = getCol(['alamat', 'address']);
-const colLat = getCol(['nearby_lat', 'lat', 'latitude']);
-  const colLng = getCol(['nearby_lng', 'lng', 'longitude', 'long']);
+      const colLat = getCol(['nearby_lat', 'lat', 'latitude']);
+      const colLng = getCol(['nearby_lng', 'lng', 'longitude', 'long']);
       const colStatus = getCol(['ket', 'status', 'ket status']);
       const colMidNmid = getCol(['mid/nmid', 'mid_nmid', 'midnmid']);
 
       const data = [];
       const byStatus = {};
       const byBranch = {};
+      let missingCoords = 0;
 
       for (let i = 1; i < jsonData.length; i++) {
         const row = jsonData[i];
@@ -94,13 +119,17 @@ const colLat = getCol(['nearby_lat', 'lat', 'latitude']);
         const branchName = colBranchName >= 0 ? String(row[colBranchName] || '').trim() : '';
         const name = colName >= 0 ? String(row[colName] || '').trim() : '';
         const address = colAddress >= 0 ? String(row[colAddress] || '').trim() : '';
-        const lat = colLat >= 0 ? parseFloat(row[colLat]) : 0;
-        const lng = colLng >= 0 ? parseFloat(row[colLng]) : 0;
+        // Missing coordinates stay null. Emitting 0 here pins the marker to the
+        // Gulf of Guinea, which is indistinguishable from a real 0,0 record.
+        const lat = colLat >= 0 ? parseCoord(row[colLat]) : null;
+        const lng = colLng >= 0 ? parseCoord(row[colLng]) : null;
         const status = colStatus >= 0 ? String(row[colStatus] || '').trim() : 'Belum FU';
         const midNmid = colMidNmid >= 0 ? row[colMidNmid] : '';
 
         if (!name && !branchName && !branchCode) continue;
-        if (isNaN(lat) || isNaN(lng)) continue;
+
+        const hasCoords = lat !== null && lng !== null;
+        if (!hasCoords) missingCoords++;
 
         const location = {
           id: i,
@@ -108,12 +137,13 @@ const colLat = getCol(['nearby_lat', 'lat', 'latitude']);
           branchCode,
           branchName,
           address,
-          lat,
-          lng,
+          lat: hasCoords ? lat : null,
+          lng: hasCoords ? lng : null,
+          hasCoords,
           name: name || branchName || `Location ${i}`,
           status: status || 'Belum FU',
-          srcLat: lat,
-          srcLng: lng,
+          srcLat: hasCoords ? lat : null,
+          srcLng: hasCoords ? lng : null,
           midNmid: midNmid || '',
           sorotLink: ''
         };
@@ -126,6 +156,8 @@ const colLat = getCol(['nearby_lat', 'lat', 'latitude']);
 
       const stats = {
         total: data.length,
+        withCoords: data.length - missingCoords,
+        missingCoords,
         byStatus,
         byBranch
       };
