@@ -162,6 +162,75 @@ function parseSenatorMapData(filePath) {
         byBranch
       };
 
+      // The REKAM MEDIS cabang workbooks carry no header row the senator
+      // column names match — their first rows are area and section labels,
+      // and branch rows simply start with a 5-digit code and a name. When
+      // nothing matched above, scan for those rows so the same workbook
+      // still plots instead of coming back empty.
+      if (data.length === 0) {
+        const seen = new Set();
+        for (let i = 1; i < jsonData.length; i++) {
+          const row = jsonData[i];
+          if (!row || row.length < 2) continue;
+          const code = String(row[0] || '').trim();
+          const name = String(row[1] || '').trim();
+          if (!/^\d{5}$/.test(code) || !name) continue;
+          if (seen.has(code)) continue;
+          seen.add(code);
+
+          const coords = BRANCH_COORDS[code] || null;
+          const lat = coords ? coords[0] : null;
+          const lng = coords ? coords[1] : null;
+          const hasCoords = lat !== null && lng !== null;
+
+          const location = {
+            id: i,
+            placeId: `place_${i}`,
+            branchCode: code,
+            branchName: name,
+            address: '',
+            lat,
+            lng,
+            hasCoords,
+            name,
+            status: 'Belum FU',
+            srcLat: lat,
+            srcLng: lng,
+            midNmid: '',
+            sorotLink: ''
+          };
+
+          data.push(location);
+          byStatus[location.status] = (byStatus[location.status] || 0) + 1;
+          byBranch[name] = (byBranch[name] || 0) + 1;
+          if (!hasCoords) missingCoords++;
+        }
+
+        stats.total = data.length;
+        stats.withCoords = data.length - missingCoords;
+        stats.missingCoords = missingCoords;
+        stats.byStatus = byStatus;
+        stats.byBranch = byBranch;
+      }
+
+      // Rows that parsed without coordinates can still be positioned when
+      // their branch code is one of the 41 known branches.
+      for (const location of data) {
+        if (location.hasCoords) continue;
+        const coords = location.branchCode ? BRANCH_COORDS[location.branchCode] : null;
+        if (!coords) continue;
+        location.lat = coords[0];
+        location.lng = coords[1];
+        location.srcLat = coords[0];
+        location.srcLng = coords[1];
+        location.hasCoords = true;
+        missingCoords--;
+      }
+      if (missingCoords < 0) {
+        stats.withCoords = data.length;
+        stats.missingCoords = 0;
+      }
+
       resolve({ data, stats });
     } catch (e) {
       reject(e);
