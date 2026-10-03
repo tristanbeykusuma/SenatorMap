@@ -1293,21 +1293,57 @@ app.post('/api/upload/confirm', upload.single('file'), ah(async (req, res) => {
   }
 }));
 
+// The senator map keeps its records in the default_data blob
+// (data_type = 'senator'), not in the legacy merchants table, so
+// status and SOROT edits are applied there and survive a refresh
+// or a redeploy.
+async function loadSenatorRows() {
+  const row = await db.prepare('SELECT data, stats FROM default_data WHERE data_type = ?').get(['senator']);
+  if (!row) return { data: [], stats: {} };
+  try {
+    return {
+      data: JSON.parse(row.data),
+      stats: row.stats ? JSON.parse(row.stats) : {}
+    };
+  } catch {
+    return { data: [], stats: {} };
+  }
+}
+
+async function saveSenatorRows(data, stats) {
+  await db.prepare('INSERT OR REPLACE INTO default_data (data_type, data, stats) VALUES (?, ?, ?)').run('senator', JSON.stringify(data), JSON.stringify(stats));
+}
+
 app.patch('/api/merchants/:id/status', ah(async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
-  await db.prepare('UPDATE merchants SET status = ? WHERE id = ?').run(status, id);
-  const updated = await db.prepare('SELECT * FROM merchants WHERE id = ?').get([id]);
-  res.json(updated);
+  const { data, stats } = await loadSenatorRows();
+  const location = data.find((loc) => String(loc.id) === String(id));
+  if (!location) {
+    return res.status(404).json({ success: false, error: `Location ${id} not found` });
+  }
+  const oldStatus = location.status;
+  location.status = status;
+  if (stats.byStatus) {
+    stats.byStatus[oldStatus] = Math.max(0, (stats.byStatus[oldStatus] || 1) - 1);
+    stats.byStatus[status] = (stats.byStatus[status] || 0) + 1;
+  }
+  await saveSenatorRows(data, stats);
+  res.json({ success: true, data: location, stats });
 }));
 
 app.patch('/api/merchants/:id/sorot', ah(async (req, res) => {
   const { id } = req.params;
-  const { reason } = req.body;
-  await db.prepare('INSERT INTO merchant_sorot (merchant_id, reason) VALUES (?, ?)').run(id, reason);
-  const merchant = await db.prepare('SELECT * FROM merchants WHERE id = ?').get([id]);
-  const sorot = await db.prepare('SELECT * FROM merchant_sorot WHERE merchant_id = ? ORDER BY created_at DESC').all([id]);
-  res.json({ merchant, sorot });
+  // The map sends { contentLink }; older callers used { reason }.
+  const contentLink = req.body?.contentLink ?? req.body?.reason ?? '';
+  const { data, stats } = await loadSenatorRows();
+  const location = data.find((loc) => String(loc.id) === String(id));
+  if (!location) {
+    return res.status(404).json({ success: false, error: `Location ${id} not found` });
+  }
+  location.sorotLink = contentLink;
+  await saveSenatorRows(data, stats);
+  res.json({ success: true, data: location });
 }));
 
 app.get('/api/merchants', ah(async (req, res) => {
